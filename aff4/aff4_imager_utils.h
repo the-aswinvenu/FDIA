@@ -261,6 +261,18 @@ class BasicImager {
                    "an AFF4 volume to verify.",
                    false));
 
+        AddArg(new TCLAP::ValueArg<std::string>(
+                   "A", "archive", "Directory to write the deduplicated archive into.",
+                   false, "", "path to directory"));
+
+        AddArg(new TCLAP::ValueArg<std::string>(
+                   "E", "extract-archive", "Directory to extract the deduplicated archive from.",
+                   false, "", "path to directory"));
+
+        AddArg(new TCLAP::ValueArg<std::string>(
+                   "M", "map", "Name of the map file to extract.",
+                   false, "", "map filename"));
+
         AddArg(new TCLAP::UnlabeledMultiArg<std::string>(
                    "aff4_volumes",
                    "These AFF4 Volumes will be loaded and their metadata will "

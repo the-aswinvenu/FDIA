@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(AFF4 
     VERSION 1.0.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
     DESCRIPTION "AFF4 (Advanced Forensic Format 4) library for digital forensics"
 )
 
@@ -17,8 +17,6 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---- Build Options ----
-option(BUILD_SHARED_LIBS "Build as shared library instead of static" OFF)
-option(WITH_YAML "Enable YAML support via libyaml-cpp" OFF)
 option(AFF4_DISABLE_LOGGING "Disable internal logging" ON)
 option(BUILD_EXECUTABLES "Build command-line tools (aff4imager)" ON)
 
@@ -35,17 +33,26 @@ pkg_check_modules(UUID REQUIRED uuid)
 
 find_library(SNAPPY_LIB snappy REQUIRED)
 find_library(LZ4_LIB lz4 REQUIRED)
+find_library(ROCKSDB_LIB rocksdb REQUIRED)
+include(FetchContent)
+FetchContent_Declare(
+  blake3
+  GIT_REPOSITORY https://github.com/BLAKE3-team/BLAKE3.git
+  GIT_TAG        1.3.1
+)
+FetchContent_Populate(blake3)
+add_library(blake3 STATIC
+    ${blake3_SOURCE_DIR}/c/blake3.c
+    ${blake3_SOURCE_DIR}/c/blake3_dispatch.c
+    ${blake3_SOURCE_DIR}/c/blake3_portable.c
+)
+target_compile_definitions(blake3 PRIVATE 
+    BLAKE3_NO_SSE2 BLAKE3_NO_SSE41 BLAKE3_NO_AVX2 BLAKE3_NO_AVX512
+)
+set(BLAKE3_LIB blake3)
 find_library(FMT_LIB fmt)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
-
-# Optional dependencies
-if(WITH_YAML)
-    find_package(yaml-cpp)
-    if(NOT yaml-cpp_FOUND)
-        pkg_check_modules(YAML yaml-cpp)
-    endif()
-endif()
 
 # ---- Generate config.h ----
 # Create aff4 subdirectory in build for generated header
@@ -83,10 +90,6 @@ file(WRITE ${CONFIG_H}
 "
 )
 
-if(WITH_YAML)
-    file(APPEND ${CONFIG_H} "#define AFF4_HAS_LIBYAML_CPP 1\n")
-endif()
-
 # ---- Core Library Sources ----
 set(AFF4_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.cc
@@ -103,18 +106,13 @@ set(AFF4_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_init.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/volume_group.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/libaff4.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/libaff4-c.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/tclap_parsers.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_hash.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_archive.cc
 )
 
 # ---- Create Library Target ----
-if(BUILD_SHARED_LIBS)
-    add_library(aff4 SHARED ${AFF4_SOURCES})
-    set_target_properties(aff4 PROPERTIES VERSION ${PROJECT_VERSION})
-else()
-    add_library(aff4 STATIC ${AFF4_SOURCES})
-endif()
+add_library(aff4 STATIC ${AFF4_SOURCES})
 
 # ---- Include Directories ----
 target_include_directories(aff4 
@@ -130,6 +128,7 @@ target_include_directories(aff4
         ${URIPARSER_INCLUDE_DIRS}
         ${UUID_INCLUDE_DIRS}
         ${OPENSSL_INCLUDE_DIR}
+        ${blake3_SOURCE_DIR}/c
 )
 
 # ---- Link Libraries ----
@@ -144,14 +143,12 @@ target_link_libraries(aff4
         ${URIPARSER_LIBRARIES}
         ${UUID_LIBRARIES}
         ${FMT_LIB}
+        ${ROCKSDB_LIB}
+        ${BLAKE3_LIB}
         Threads::Threads
         OpenSSL::SSL
         OpenSSL::Crypto
 )
-
-if(WITH_YAML AND yaml-cpp_FOUND)
-    target_link_libraries(aff4 PUBLIC yaml-cpp)
-endif()
 
 # ---- Compiler Flags ----
 target_compile_options(aff4 PRIVATE
@@ -170,8 +167,11 @@ if(BUILD_EXECUTABLES)
     add_executable(aff4imager ${CMAKE_CURRENT_SOURCE_DIR}/aff4imager.cc)
     target_link_libraries(aff4imager PRIVATE aff4)
     
+    add_executable(test_archival ${CMAKE_CURRENT_SOURCE_DIR}/test/test_archival.cc)
+    target_link_libraries(test_archival PRIVATE aff4)
+    
     # Installation
-    install(TARGETS aff4imager DESTINATION bin)
+    install(TARGETS aff4imager test_archival DESTINATION bin)
 endif()
 
 # ---- Installation ----
@@ -204,11 +204,10 @@ message(STATUS "  - RAPTOR2:          ${RAPTOR2_FOUND}")
 message(STATUS "  - ZLIB:             ${ZLIB_FOUND}")
 message(STATUS "  - SNAPPY:           ${SNAPPY_LIB}")
 message(STATUS "  - LZ4:              ${LZ4_LIB}")
+message(STATUS "  - ROCKSDB:          ${ROCKSDB_LIB}")
+message(STATUS "  - BLAKE3:           ${BLAKE3_LIB}")
 message(STATUS "  - TCLAP:            ${TCLAP_FOUND}")
 message(STATUS "  - Threads:          ${CMAKE_HAVE_THREADS_LIBRARY}")
 message(STATUS "  - OpenSSL:          ${OPENSSL_FOUND}")
-if(WITH_YAML)
-    message(STATUS "  - yaml-cpp:         ${yaml-cpp_FOUND}")
-endif()
 message(STATUS "========================================")
 

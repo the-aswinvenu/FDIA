@@ -187,7 +187,7 @@ AFF4Status BasicImager::ProcessArgs() {
         result = handle_export();
     }
 
-    if (result == CONTINUE && inputs.size() > 0) {
+    if (result == CONTINUE && (inputs.size() > 0 || Get("extract-archive")->isSet())) {
         result = process_input();
     }
 
@@ -323,15 +323,45 @@ AFF4Status BasicImager::parse_input() {
 }
 
 AFF4Status BasicImager::process_input() {
+    bool use_archive = Get("archive")->isSet();
+    std::unique_ptr<ArchiveChunkStore> archive_store;
+    if (use_archive) {
+        std::string archive_dir = GetArg<TCLAP::ValueArg<std::string>>("archive")->getValue();
+        archive_store = std::make_unique<ArchiveChunkStore>(&resolver, archive_dir);
+        RETURN_IF_ERROR(archive_store->Initialize());
+    }
+
+    bool use_extract = Get("extract-archive")->isSet();
+    if (use_extract) {
+        std::string extract_dir = GetArg<TCLAP::ValueArg<std::string>>("extract-archive")->getValue();
+        if (!Get("map")->isSet() || !Get("output")->isSet()) {
+            std::cerr << "Extraction requires --map and --output arguments.\n";
+            return INVALID_INPUT;
+        }
+        std::string map_name = GetArg<TCLAP::ValueArg<std::string>>("map")->getValue();
+        std::string out_path = GetArg<TCLAP::ValueArg<std::string>>("output")->getValue();
+        
+        ArchiveExtractor extractor(extract_dir);
+        AFF4Status status = extractor.ExtractMap(map_name, out_path);
+        if (status != STATUS_OK) {
+            std::cerr << "Failed to extract map: " << map_name << "\n";
+        } else {
+            std::cout << "Successfully extracted map " << map_name << " to " << out_path << "\n";
+        }
+        return status;
+    }
+
     for (std::string glob : inputs) {
         for (std::string input : GlobFilename(glob)) {
 
-            // Check if the volume needs to be split.
-            VolumeManager(&resolver, this).MaybeSwitchVolumes();
+            AFF4Volume *volume = nullptr;
+            if (!use_archive) {
+                // Check if the volume needs to be split.
+                VolumeManager(&resolver, this).MaybeSwitchVolumes();
 
-            // Get the output volume.
-            AFF4Volume *volume;
-            RETURN_IF_ERROR(GetCurrentVolume(&volume));
+                // Get the output volume.
+                RETURN_IF_ERROR(GetCurrentVolume(&volume));
+            }
 
             AFF4Flusher<FileBackedObject> input_stream;
 
@@ -351,14 +381,28 @@ AFF4Status BasicImager::process_input() {
                 }
 
                 URN current_dir_urn = URN::NewURNFromFilename(cwd, false);
-                image_urn.Set(volume->urn.Append(current_dir_urn.RelativePath(
-                                                    input_stream->urn)));
+                if (volume) {
+                    image_urn.Set(volume->urn.Append(current_dir_urn.RelativePath(input_stream->urn)));
+                } else {
+                    image_urn.Set(URN("aff4://archive/").Append(current_dir_urn.RelativePath(input_stream->urn)));
+                }
             } else {
-                image_urn.Set(volume->urn.Append(input_stream->urn.Path()));
+                if (volume) {
+                    image_urn.Set(volume->urn.Append(input_stream->urn.Path()));
+                } else {
+                    image_urn.Set(URN("aff4://archive/").Append(input_stream->urn.Path()));
+                }
 
                 // Store the original filename.
                 resolver.Set(image_urn, AFF4_STREAM_ORIGINAL_FILENAME,
                              new XSDString(input));
+            }
+
+            if (use_archive) {
+                resolver.logger->info("Ingesting {} into archive", input);
+                RETURN_IF_ERROR(archive_store->IngestStream(input_stream.get(), image_urn));
+                resolver.Set(image_urn, AFF4_TYPE, new URN(AFF4_IMAGE_TYPE), false);
+                continue;
             }
 
             // For very small streams, it is more efficient to just store them without
