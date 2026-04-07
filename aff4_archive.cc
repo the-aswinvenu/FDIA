@@ -84,6 +84,54 @@ static const uint64_t GEAR_MATRIX[256] = {
     0xa1d8c675a133c6e2ULL, 0x268c2860229f520dULL, 0xd2c3eab3b219c3e8ULL, 0x6ac494eec81041aeULL
 };
 
+namespace {
+
+void ComputeSha256(const uint8_t* data, size_t length, uint8_t out[32]) {
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx, data, length);
+    unsigned int digest_length = 0;
+    EVP_DigestFinal_ex(ctx, out, &digest_length);
+    EVP_MD_CTX_free(ctx);
+}
+
+bool ComputeSha256ForFilePrefix(FILE* file, uint64_t length, uint8_t out[32]) {
+    if (fflush(file) != 0) {
+        return false;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+
+    std::vector<uint8_t> buffer(1024 * 1024);
+    uint64_t remaining = length;
+    while (remaining > 0) {
+        size_t to_read = static_cast<size_t>(std::min<uint64_t>(buffer.size(), remaining));
+        size_t read_bytes = fread(buffer.data(), 1, to_read, file);
+        if (read_bytes != to_read) {
+            EVP_MD_CTX_free(ctx);
+            return false;
+        }
+        EVP_DigestUpdate(ctx, buffer.data(), read_bytes);
+        remaining -= read_bytes;
+    }
+
+    unsigned int digest_length = 0;
+    EVP_DigestFinal_ex(ctx, out, &digest_length);
+    EVP_MD_CTX_free(ctx);
+    return true;
+}
+
+void AppendBytes(std::vector<uint8_t>& out, const void* data, size_t length) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    out.insert(out.end(), bytes, bytes + length);
+}
+
+}  // namespace
+
 // -------------------------------------------------------------
 // ChunkCorpus (RocksDB)
 // -------------------------------------------------------------
@@ -153,11 +201,10 @@ BevyWriter::~BevyWriter() {
 
 AFF4Status BevyWriter::Initialize() {
     std::string filepath = dir_path_ + "/bevy_" + std::to_string(bevy_id_) + ".bev";
-    file_ = fopen(filepath.c_str(), "wb");
+    file_ = fopen(filepath.c_str(), "w+b");
     if (!file_) return GENERIC_ERROR;
-    // Write an empty header or just skip to chunk records. The spec says [Header][Records]...
-    // Let's assume a 16-byte magic header "AFF4BEVY\0\0\0\0\0\0\0\0"
-    const char magic[16] = "AFF4BEVY";
+    char magic[16] = {};
+    memcpy(magic, "AFF4BEVY", 8);
     fwrite(magic, 1, 16, file_);
     current_size_ = 16;
     return STATUS_OK;
@@ -182,49 +229,33 @@ AFF4Status BevyWriter::AppendChunk(const ChunkRecordHeaderV1& header, const uint
 
 AFF4Status BevyWriter::FinalizeBevy() {
     if (!file_) return STATUS_OK;
-    
+
     uint64_t index_offset = current_size_;
-    
-    // Write internal index table
+
     for (uint64_t offset : chunk_offsets_) {
-        fwrite(&offset, 1, sizeof(offset), file_);
+        if (fwrite(&offset, 1, sizeof(offset), file_) != sizeof(offset)) {
+            return GENERIC_ERROR;
+        }
         current_size_ += sizeof(offset);
     }
-    
-    // Construct footer
-    BevyFooterV1 footer;
+
+    BevyFooterV1 footer{};
     footer.chunk_count = chunk_offsets_.size();
     footer.bevy_size = current_size_ + sizeof(footer);
     footer.index_offset = index_offset;
-    memset(footer.sha256, 0, 32); 
-    
-    // We should compute SHA-256 over exactly what we've written. Since we can just re-read it:
-    fflush(file_);
-    
-    int fd = fileno(file_);
-    lseek(fd, 0, SEEK_SET);
-    EVP_MD_CTX* sha_ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(sha_ctx, EVP_sha256(), nullptr);
-    
-    std::vector<uint8_t> buf(1024 * 1024);
-    uint64_t remaining = current_size_;
-    while (remaining > 0) {
-        size_t to_read = std::min((uint64_t)buf.size(), remaining);
-        read(fd, buf.data(), to_read);
-        EVP_DigestUpdate(sha_ctx, buf.data(), to_read);
-        remaining -= to_read;
+
+    if (!ComputeSha256ForFilePrefix(file_, current_size_, footer.sha256)) {
+        return GENERIC_ERROR;
     }
-    // Hash the footer so far (excluding sha256 bytes)
-    EVP_DigestUpdate(sha_ctx, &footer.chunk_count, sizeof(uint64_t) * 3);
-    unsigned int md_len = 0;
-    EVP_DigestFinal_ex(sha_ctx, footer.sha256, &md_len);
-    EVP_MD_CTX_free(sha_ctx);
-    
-    // Now write footer
-    lseek(fd, current_size_, SEEK_SET);
-    fwrite(&footer, 1, sizeof(footer), file_);
+
+    if (fseek(file_, current_size_, SEEK_SET) != 0) {
+        return GENERIC_ERROR;
+    }
+    if (fwrite(&footer, 1, sizeof(footer), file_) != sizeof(footer)) {
+        return GENERIC_ERROR;
+    }
     current_size_ += sizeof(footer);
-    
+
     fclose(file_);
     file_ = nullptr;
     return STATUS_OK;
@@ -243,39 +274,58 @@ AFF4Status ArchiveMapStream::AppendRef(const ChunkRefV1& ref) {
 }
 
 AFF4Status ArchiveMapStream::FinalizeMap(const std::string& path) {
-    // Write LZ4 compressed Map 
-    // [Header][Segments][Footer]
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return GENERIC_ERROR;
-    
-    // We will just write raw bytes and normally we'd compress inside a stream.
-    // For simplicity, we serialize the entire map into a buffer, then LZ4 it.
+
     std::vector<uint8_t> map_data;
-    const uint8_t magic[8] = {'A','F','F','4','M','A','P','\0'};
-    map_data.insert(map_data.end(), magic, magic + 8);
-    
-    SegmentHeaderV1 seg;
-    seg.logical_offset = 0;
-    seg.chunk_count = current_segment_refs_.size();
-    
-    const uint8_t* seg_ptr = (const uint8_t*)&seg;
-    map_data.insert(map_data.end(), seg_ptr, seg_ptr + sizeof(seg));
-    
+
+    MapStreamHeaderV1 header{};
+    memcpy(header.magic, "AFF4MAP1", sizeof(header.magic));
+    header.logical_size = logical_offset_;
+    header.segment_count = 1;
+    header.reserved = 0;
+    AppendBytes(map_data, &header, sizeof(header));
+
+    SegmentHeaderV1 segment{};
+    segment.logical_offset = 0;
+    segment.chunk_count = current_segment_refs_.size();
+    AppendBytes(map_data, &segment, sizeof(segment));
+
     for (const auto& ref : current_segment_refs_) {
-        const uint8_t* ref_ptr = (const uint8_t*)&ref;
-        map_data.insert(map_data.end(), ref_ptr, ref_ptr + sizeof(ref));
+        AppendBytes(map_data, &ref, sizeof(ref));
     }
-    
-    // Write LZ4
-    int max_lz4_size = LZ4_compressBound(map_data.size());
+
+    MapStreamFooterV1 footer{};
+    footer.chunk_count = current_segment_refs_.size();
+    footer.logical_size = logical_offset_;
+    footer.data_size = map_data.size() + sizeof(footer);
+    ComputeSha256(map_data.data(), map_data.size(), footer.sha256);
+    AppendBytes(map_data, &footer, sizeof(footer));
+
+    int max_lz4_size = LZ4_compressBound(static_cast<int>(map_data.size()));
+    if (max_lz4_size <= 0) {
+        fclose(f);
+        return GENERIC_ERROR;
+    }
     std::vector<uint8_t> lz4_buf(max_lz4_size);
-    int compressed_size = LZ4_compress_default((const char*)map_data.data(), (char*)lz4_buf.data(), map_data.size(), max_lz4_size);
-    
+    int compressed_size = LZ4_compress_default(
+        reinterpret_cast<const char*>(map_data.data()),
+        reinterpret_cast<char*>(lz4_buf.data()),
+        static_cast<int>(map_data.size()),
+        max_lz4_size);
+    if (compressed_size <= 0) {
+        fclose(f);
+        return GENERIC_ERROR;
+    }
+
     uint64_t uncompressed_size = map_data.size();
-    fwrite(&uncompressed_size, 1, sizeof(uint64_t), f); // Size of uncompressed
-    fwrite(lz4_buf.data(), 1, compressed_size, f);
+    if (fwrite(&uncompressed_size, 1, sizeof(uint64_t), f) != sizeof(uint64_t) ||
+        fwrite(lz4_buf.data(), 1, compressed_size, f) != static_cast<size_t>(compressed_size)) {
+        fclose(f);
+        return GENERIC_ERROR;
+    }
+
     fclose(f);
-    
     return STATUS_OK;
 }
 
@@ -490,8 +540,14 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
     std::replace(clean_urn.begin(), clean_urn.end(), '/', '_');
     std::replace(clean_urn.begin(), clean_urn.end(), ':', '_');
     std::string map_file = archive_dir_ + "/maps/map_" + clean_urn + ".map.lz4";
-    map_stream.FinalizeMap(map_file);
-    
+    if (map_stream.FinalizeMap(map_file) != STATUS_OK) {
+        return GENERIC_ERROR;
+    }
+
+    if (bevy_writer_->FinalizeBevy() != STATUS_OK) {
+        std::cerr << "Failed to finalize bevy\n";
+        return GENERIC_ERROR;
+    }
     return STATUS_OK;
 }
 
@@ -506,14 +562,85 @@ ArchiveExtractor::~ArchiveExtractor() {
     }
 }
 
-FILE* ArchiveExtractor::GetBevyFile(uint32_t bevy_id) {
-    if (open_bevies_.count(bevy_id)) {
-        return open_bevies_[bevy_id];
+AFF4Status ArchiveExtractor::ValidateBevy(FILE* bevy_file, uint32_t bevy_id) {
+    if (!bevy_file) {
+        return GENERIC_ERROR;
     }
+
+    if (fseek(bevy_file, 0, SEEK_END) != 0) {
+        return GENERIC_ERROR;
+    }
+    long file_size_long = ftell(bevy_file);
+    if (file_size_long < 0) {
+        return GENERIC_ERROR;
+    }
+
+    uint64_t file_size = static_cast<uint64_t>(file_size_long);
+    if (file_size < 16 + sizeof(BevyFooterV1)) {
+        return GENERIC_ERROR;
+    }
+
+    if (fseek(bevy_file, 0, SEEK_SET) != 0) {
+        return GENERIC_ERROR;
+    }
+
+    char magic[16] = {0};
+    if (fread(magic, 1, sizeof(magic), bevy_file) != sizeof(magic)) {
+        return GENERIC_ERROR;
+    }
+    if (memcmp(magic, "AFF4BEVY", 8) != 0) {
+        return GENERIC_ERROR;
+    }
+
+    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooterV1)), SEEK_SET) != 0) {
+        return GENERIC_ERROR;
+    }
+
+    BevyFooterV1 footer{};
+    if (fread(&footer, 1, sizeof(footer), bevy_file) != sizeof(footer)) {
+        return GENERIC_ERROR;
+    }
+
+    if (footer.bevy_size != file_size || footer.index_offset < 16 || footer.index_offset >= file_size - sizeof(BevyFooterV1)) {
+        return GENERIC_ERROR;
+    }
+
+    std::vector<uint8_t> computed_sha(32);
+    if (!ComputeSha256ForFilePrefix(bevy_file, file_size - sizeof(BevyFooterV1), computed_sha.data())) {
+        return GENERIC_ERROR;
+    }
+
+    if (memcmp(computed_sha.data(), footer.sha256, 32) != 0) {
+        return GENERIC_ERROR;
+    }
+
+    if (fseek(bevy_file, 0, SEEK_SET) != 0) {
+        return GENERIC_ERROR;
+    }
+
+    validated_bevies_.insert(bevy_id);
+    return STATUS_OK;
+}
+
+FILE* ArchiveExtractor::GetBevyFile(uint32_t bevy_id) {
+    auto cached = open_bevies_.find(bevy_id);
+    if (cached != open_bevies_.end()) {
+        return cached->second;
+    }
+
     std::string path = archive_dir_ + "/bevies/bevy_" + std::to_string(bevy_id) + ".bev";
     FILE* f = fopen(path.c_str(), "rb");
-    if (f) open_bevies_[bevy_id] = f;
-    return f; 
+    if (!f) {
+        return nullptr;
+    }
+
+    if (ValidateBevy(f, bevy_id) != STATUS_OK) {
+        fclose(f);
+        return nullptr;
+    }
+
+    open_bevies_[bevy_id] = f;
+    return f;
 }
 
 AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::string& output_path) {
@@ -538,12 +665,25 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
 
     std::vector<uint8_t> uncompressed(uncompressed_size);
     int res = LZ4_decompress_safe((const char*)compressed.data(), (char*)uncompressed.data(), compressed_size, uncompressed_size);
-    if (res < 0 || uncompressed_size < 8 + sizeof(SegmentHeaderV1)) { std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n"; return GENERIC_ERROR; }
+    if (res < 0 || uncompressed_size < sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1) + sizeof(MapStreamFooterV1)) { std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n"; return GENERIC_ERROR; }
 
-    if (memcmp(uncompressed.data(), "AFF4MAP\0", 8) != 0) { std::cerr<<"Fail 5: Magic mismatch\n"; return GENERIC_ERROR; }
+    MapStreamHeaderV1* map_header = reinterpret_cast<MapStreamHeaderV1*>(uncompressed.data());
+    if (memcmp(map_header->magic, "AFF4MAP1", sizeof(map_header->magic)) != 0) { std::cerr<<"Fail 5: Magic mismatch\n"; return GENERIC_ERROR; }
 
-    SegmentHeaderV1* seg = (SegmentHeaderV1*)(uncompressed.data() + 8);
-    ChunkRefV1* refs = (ChunkRefV1*)(uncompressed.data() + 8 + sizeof(SegmentHeaderV1));
+    MapStreamFooterV1* footer = reinterpret_cast<MapStreamFooterV1*>(uncompressed.data() + uncompressed_size - sizeof(MapStreamFooterV1));
+    if (footer->data_size != uncompressed_size || footer->logical_size != map_header->logical_size) { std::cerr<<"Fail 5b: Map footer mismatch\n"; return GENERIC_ERROR; }
+
+    std::vector<uint8_t> computed_sha(32);
+    ComputeSha256(uncompressed.data(), uncompressed_size - sizeof(MapStreamFooterV1), computed_sha.data());
+    if (memcmp(computed_sha.data(), footer->sha256, 32) != 0) { std::cerr<<"Fail 5c: Map checksum mismatch\n"; return GENERIC_ERROR; }
+
+    SegmentHeaderV1* seg = reinterpret_cast<SegmentHeaderV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1));
+    ChunkRefV1* refs = reinterpret_cast<ChunkRefV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1));
+
+    if (seg->chunk_count != footer->chunk_count || map_header->segment_count != 1 || seg->logical_offset != 0 || map_header->logical_size != footer->logical_size) {
+        std::cerr << "Fail 5c: Map segment metadata mismatch\n";
+        return GENERIC_ERROR;
+    }
 
     FILE* out_f = fopen(output_path.c_str(), "wb");
     if (!out_f) { std::cerr<<"Fail 6: Cannot open output\n"; return GENERIC_ERROR; }

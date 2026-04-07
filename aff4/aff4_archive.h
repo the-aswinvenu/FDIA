@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace aff4 {
 
@@ -72,6 +73,20 @@ struct ChunkRefV1 {
     uint32_t bevy_id;
     uint64_t offset;
     uint32_t uncompressed_size;
+};
+
+struct MapStreamHeaderV1 {
+    uint8_t magic[8];
+    uint64_t logical_size;
+    uint32_t segment_count;
+    uint32_t reserved;
+};
+
+struct MapStreamFooterV1 {
+    uint64_t chunk_count;
+    uint64_t logical_size;
+    uint64_t data_size;
+    uint8_t sha256[32];
 };
 
 #pragma pack(pop)
@@ -158,7 +173,9 @@ public:
 private:
     std::string archive_dir_;
     std::unordered_map<uint32_t, FILE*> open_bevies_;
+    std::unordered_set<uint32_t> validated_bevies_;
     FILE* GetBevyFile(uint32_t bevy_id);
+    AFF4Status ValidateBevy(FILE* bevy_file, uint32_t bevy_id);
 };
 
 } // namespace aff4

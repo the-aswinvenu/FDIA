@@ -102,7 +102,6 @@ set(AFF4_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_map.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_symstream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_image.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_imager_utils.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/aff4_init.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/volume_group.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/libaff4.cc
@@ -166,12 +165,9 @@ endif()
 if(BUILD_EXECUTABLES)
     add_executable(aff4imager ${CMAKE_CURRENT_SOURCE_DIR}/aff4imager.cc)
     target_link_libraries(aff4imager PRIVATE aff4)
-    
-    add_executable(test_archival ${CMAKE_CURRENT_SOURCE_DIR}/test/test_archival.cc)
-    target_link_libraries(test_archival PRIVATE aff4)
-    
+
     # Installation
-    install(TARGETS aff4imager test_archival DESTINATION bin)
+    install(TARGETS aff4imager DESTINATION bin)
 endif()
 
 # ---- Installation ----
