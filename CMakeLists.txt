@@ -19,6 +19,7 @@ endif()
 # ---- Build Options ----
 option(AFF4_DISABLE_LOGGING "Disable internal logging" ON)
 option(BUILD_EXECUTABLES "Build command-line tools (aff4imager)" ON)
+option(BUILD_DEBUG_TOOLS "Build archive debug tools" ON)
 
 # ---- Find Dependencies ----
 find_package(PkgConfig REQUIRED)
@@ -168,6 +169,16 @@ if(BUILD_EXECUTABLES)
 
     # Installation
     install(TARGETS aff4imager DESTINATION bin)
+endif()
+
+if(BUILD_DEBUG_TOOLS)
+    add_executable(archive_debug ${CMAKE_CURRENT_SOURCE_DIR}/debug/archive_debug.cc)
+    target_include_directories(archive_debug PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_BINARY_DIR}
+        ${blake3_SOURCE_DIR}/c
+    )
+    target_link_libraries(archive_debug PRIVATE aff4)
 endif()
 
 # ---- Installation ----

@@ -1,7 +1,7 @@
 #ifndef SRC_AFF4_ARCHIVE_H_
 #define SRC_AFF4_ARCHIVE_H_
 
-#include "aff4/config.h"
+// #include "aff4/config.h"
 #include "aff4_io.h"
 #include "data_store.h"
 #include <rocksdb/db.h>
@@ -11,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace aff4 {
 
@@ -101,6 +102,8 @@ public:
     AFF4Status Get(const uint8_t hash[32], ChunkIndexValueV1* value);
     AFF4Status PutMetadata(const std::string& key, const std::string& value);
     AFF4Status GetMetadata(const std::string& key, std::string* value);
+    AFF4Status ListMetadataPrefix(const std::string& prefix,
+                                  std::vector<std::pair<std::string, std::string>>* entries);
     void Close();
 
 private:
@@ -164,6 +167,7 @@ private:
     std::unique_ptr<ChunkCorpus> corpus_;
     std::unique_ptr<BevyWriter> bevy_writer_;
     std::mutex write_mutex_;
+    AFF4Status RecoverChunkJournal();
 };
 
 class ArchiveExtractor {

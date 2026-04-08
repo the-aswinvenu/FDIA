@@ -201,6 +201,7 @@ DerivedData/
 build/
 docs/
 test/
+.vscode/
 
 
 #####

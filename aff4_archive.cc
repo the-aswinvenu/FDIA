@@ -88,6 +88,22 @@ static const uint64_t GEAR_MATRIX[256] = {
 
 namespace {
 
+constexpr uint32_t kCdcMinSize = 128 * 1024;
+constexpr uint32_t kCdcTargetSize = 2 * 1024 * 1024;
+constexpr uint32_t kCdcMaxSize = 4 * 1024 * 1024;
+constexpr uint64_t kCdcEarlyMask = (1ULL << 20) - 1;
+constexpr uint64_t kCdcLateMask = (1ULL << 21) - 1;
+
+struct JournalEntry {
+    std::string state;
+    uint32_t bevy_id = 0;
+    uint64_t offset = 0;
+    uint32_t compressed_size = 0;
+    uint32_t uncompressed_size = 0;
+    uint32_t flags = 0;
+    uint8_t hash[32] = {};
+};
+
 std::string BytesToHex(const uint8_t* data, size_t len) {
     std::ostringstream out;
     out << std::hex << std::setfill('0');
@@ -95,6 +111,86 @@ std::string BytesToHex(const uint8_t* data, size_t len) {
         out << std::setw(2) << static_cast<unsigned int>(data[i]);
     }
     return out.str();
+}
+
+bool HexToBytes(const std::string& hex, uint8_t* out, size_t out_len) {
+    if (hex.size() != out_len * 2) {
+        return false;
+    }
+
+    for (size_t i = 0; i < out_len; ++i) {
+        auto parse_nibble = [](char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return 10 + (ch - 'a');
+            if (ch >= 'A' && ch <= 'F') return 10 + (ch - 'A');
+            return -1;
+        };
+
+        int high = parse_nibble(hex[i * 2]);
+        int low = parse_nibble(hex[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return false;
+        }
+        out[i] = static_cast<uint8_t>((high << 4) | low);
+    }
+
+    return true;
+}
+
+std::string BuildJournalKey(uint32_t bevy_id, uint64_t offset) {
+    return "journal/" + std::to_string(bevy_id) + "/" + std::to_string(offset);
+}
+
+std::string BuildJournalValue(const JournalEntry& entry) {
+    return entry.state + "|" + std::to_string(entry.bevy_id) + "|" +
+           std::to_string(entry.offset) + "|" + std::to_string(entry.compressed_size) +
+           "|" + std::to_string(entry.uncompressed_size) + "|" +
+           std::to_string(entry.flags) + "|" + BytesToHex(entry.hash, sizeof(entry.hash));
+}
+
+bool ParseJournalValue(const std::string& value, JournalEntry* entry) {
+    if (!entry) {
+        return false;
+    }
+
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        size_t pos = value.find('|', start);
+        parts.push_back(value.substr(start, pos == std::string::npos ? std::string::npos : pos - start));
+        if (pos == std::string::npos) {
+            break;
+        }
+        start = pos + 1;
+    }
+
+    if (parts.size() != 7) {
+        return false;
+    }
+
+    try {
+        entry->state = parts[0];
+        entry->bevy_id = static_cast<uint32_t>(std::stoul(parts[1]));
+        entry->offset = static_cast<uint64_t>(std::stoull(parts[2]));
+        entry->compressed_size = static_cast<uint32_t>(std::stoul(parts[3]));
+        entry->uncompressed_size = static_cast<uint32_t>(std::stoul(parts[4]));
+        entry->flags = static_cast<uint32_t>(std::stoul(parts[5]));
+    } catch (...) {
+        return false;
+    }
+
+    return HexToBytes(parts[6], entry->hash, sizeof(entry->hash));
+}
+
+bool IsCdcBoundary(uint64_t hash, uint32_t chunk_size) {
+    if (chunk_size < kCdcTargetSize) {
+        return (hash & kCdcEarlyMask) == 0;
+    }
+    return (hash & kCdcLateMask) == 0;
+}
+
+std::string JournalStateFromBool(bool committed) {
+    return committed ? "COMMITTED" : "PREPARED";
 }
 
 bool ComputeSha256ForFilePath(const std::string& path, uint8_t out[32]) {
@@ -271,6 +367,30 @@ AFF4Status ChunkCorpus::GetMetadata(const std::string& key, std::string* value) 
     rocksdb::Slice metadata_key(key);
     rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), metadata_cf_, metadata_key, value);
     return status.ok() ? STATUS_OK : GENERIC_ERROR;
+}
+
+AFF4Status ChunkCorpus::ListMetadataPrefix(
+    const std::string& prefix,
+    std::vector<std::pair<std::string, std::string>>* entries) {
+    if (!db_ || !metadata_cf_ || !entries) {
+        return GENERIC_ERROR;
+    }
+
+    entries->clear();
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions(), metadata_cf_));
+    for (it->Seek(prefix); it->Valid(); it->Next()) {
+        std::string key = it->key().ToString();
+        if (key.rfind(prefix, 0) != 0) {
+            break;
+        }
+        entries->emplace_back(key, it->value().ToString());
+    }
+
+    if (!it->status().ok()) {
+        return GENERIC_ERROR;
+    }
+
+    return STATUS_OK;
 }
 
 // -------------------------------------------------------------
@@ -452,6 +572,11 @@ AFF4Status ArchiveChunkStore::Initialize() {
     
     std::string maps_dir = archive_dir_ + "/maps";
     mkdir(maps_dir.c_str(), 0777);
+
+    if (RecoverChunkJournal() != STATUS_OK) {
+        std::cerr << "Failed to recover archive journal state\n";
+        return GENERIC_ERROR;
+    }
     
     uint32_t next_bevy_id = 1;
     try {
@@ -472,27 +597,213 @@ AFF4Status ArchiveChunkStore::Initialize() {
     return STATUS_OK;
 }
 
+AFF4Status ArchiveChunkStore::RecoverChunkJournal() {
+    if (!corpus_) {
+        return GENERIC_ERROR;
+    }
+
+    std::vector<std::pair<std::string, std::string>> entries;
+    if (corpus_->ListMetadataPrefix("journal/", &entries) != STATUS_OK) {
+        return GENERIC_ERROR;
+    }
+
+    uint32_t recovered_entries = 0;
+    for (const auto& [key, value] : entries) {
+        JournalEntry journal_entry;
+        if (!ParseJournalValue(value, &journal_entry)) {
+            continue;
+        }
+
+        if (journal_entry.state == "ABORTED") {
+            continue;
+        }
+
+        std::string bevy_path = archive_dir_ + "/bevies/bevy_" + std::to_string(journal_entry.bevy_id) + ".bev";
+        FILE* bevy_file = fopen(bevy_path.c_str(), "rb");
+        if (!bevy_file) {
+            journal_entry.state = "ABORTED";
+            corpus_->PutMetadata(key, BuildJournalValue(journal_entry));
+            continue;
+        }
+
+        if (fseek(bevy_file, static_cast<long>(journal_entry.offset), SEEK_SET) != 0) {
+            fclose(bevy_file);
+            journal_entry.state = "ABORTED";
+            corpus_->PutMetadata(key, BuildJournalValue(journal_entry));
+            continue;
+        }
+
+        ChunkRecordHeaderV1 header{};
+        if (fread(&header, 1, sizeof(header), bevy_file) != sizeof(header)) {
+            fclose(bevy_file);
+            journal_entry.state = "ABORTED";
+            corpus_->PutMetadata(key, BuildJournalValue(journal_entry));
+            continue;
+        }
+
+        if (header.compressed_size != journal_entry.compressed_size ||
+            header.uncompressed_size != journal_entry.uncompressed_size ||
+            header.compression_type != static_cast<uint8_t>(journal_entry.flags) ||
+            memcmp(header.blake3_hash, journal_entry.hash, sizeof(journal_entry.hash)) != 0) {
+            fclose(bevy_file);
+            journal_entry.state = "ABORTED";
+            corpus_->PutMetadata(key, BuildJournalValue(journal_entry));
+            continue;
+        }
+
+        fclose(bevy_file);
+
+        ChunkIndexValueV1 index_val{};
+        index_val.bevy_id = journal_entry.bevy_id;
+        index_val.offset = journal_entry.offset;
+        index_val.compressed_size = journal_entry.compressed_size;
+        index_val.uncompressed_size = journal_entry.uncompressed_size;
+        index_val.flags = journal_entry.flags;
+
+        if (corpus_->Put(journal_entry.hash, index_val) != STATUS_OK) {
+            return GENERIC_ERROR;
+        }
+
+        journal_entry.state = JournalStateFromBool(true);
+        if (corpus_->PutMetadata(key, BuildJournalValue(journal_entry)) != STATUS_OK) {
+            return GENERIC_ERROR;
+        }
+
+        ++recovered_entries;
+    }
+
+    if (recovered_entries > 0) {
+        std::cout << "Recovered " << recovered_entries << " pending chunk journal entries.\n";
+    }
+
+    return STATUS_OK;
+}
+
 AFF4Status ArchiveChunkStore::IngestStream(
     AFF4Stream* input_stream, URN image_urn, const std::string& expected_input_sha256_hex) {
     if (!input_stream || !corpus_ || !bevy_writer_) return GENERIC_ERROR;
     
     ArchiveMapStream map_stream(resolver_, image_urn);
-    
-    const uint32_t MIN_SIZE = 128 * 1024;
-    const uint32_t MAX_SIZE = 4 * 1024 * 1024;
-    
-    std::vector<uint8_t> buffer(MAX_SIZE);
+
+    std::vector<uint8_t> buffer(kCdcMaxSize);
     uint32_t current_chunk_size = 0;
     uint64_t hash = 0;
+
+    auto process_chunk = [&](const uint8_t* chunk_data, uint32_t chunk_size) -> AFF4Status {
+        if (chunk_size == 0) {
+            return STATUS_OK;
+        }
+
+        blake3_hasher hasher;
+        blake3_hasher_init(&hasher);
+        blake3_hasher_update(&hasher, chunk_data, chunk_size);
+        uint8_t raw_hash[BLAKE3_OUT_LEN];
+        blake3_hasher_finalize(&hasher, raw_hash, BLAKE3_OUT_LEN);
+
+        ChunkIndexValueV1 index_val;
+        if (corpus_->Get(raw_hash, &index_val) == STATUS_OK) {
+            ChunkRefV1 ref{index_val.bevy_id, index_val.offset, index_val.uncompressed_size};
+            if (map_stream.AppendRef(ref) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
+            return STATUS_OK;
+        }
+
+        int max_lz4_size = LZ4_compressBound(chunk_size);
+        std::vector<uint8_t> compressed(max_lz4_size);
+        int comp_size = LZ4_compress_default(
+            reinterpret_cast<const char*>(chunk_data),
+            reinterpret_cast<char*>(compressed.data()),
+            chunk_size,
+            max_lz4_size);
+
+        ChunkRecordHeaderV1 record_header{};
+        record_header.uncompressed_size = chunk_size;
+        memcpy(record_header.blake3_hash, raw_hash, 32);
+        memset(record_header.reserved, 0, 3);
+
+        const uint8_t* payload_ptr = chunk_data;
+        if (comp_size > 0 && comp_size < static_cast<int>(chunk_size)) {
+            record_header.compressed_size = static_cast<uint32_t>(comp_size);
+            record_header.compression_type = 1;
+            payload_ptr = compressed.data();
+        } else {
+            record_header.compressed_size = chunk_size;
+            record_header.compression_type = 0;
+        }
+
+        JournalEntry journal_entry{};
+        journal_entry.state = "PREPARED";
+        journal_entry.compressed_size = record_header.compressed_size;
+        journal_entry.uncompressed_size = record_header.uncompressed_size;
+        journal_entry.flags = record_header.compression_type;
+        memcpy(journal_entry.hash, raw_hash, sizeof(journal_entry.hash));
+
+        std::string journal_key;
+        uint32_t stored_bevy_id = 0;
+        uint64_t stored_offset = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(write_mutex_);
+            if (bevy_writer_->current_size() > 2ULL * 1024 * 1024 * 1024) {
+                const uint32_t next_bevy_id = bevy_writer_->current_bevy_id() + 1;
+                if (bevy_writer_->FinalizeBevy() != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
+                bevy_writer_ = std::make_unique<BevyWriter>(archive_dir_ + "/bevies", next_bevy_id);
+                if (bevy_writer_->Initialize() != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
+            }
+
+            journal_entry.bevy_id = bevy_writer_->current_bevy_id();
+            journal_entry.offset = bevy_writer_->current_size();
+            journal_key = BuildJournalKey(journal_entry.bevy_id, journal_entry.offset);
+
+            if (corpus_->PutMetadata(journal_key, BuildJournalValue(journal_entry)) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
+
+            if (bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
+        }
+
+        if (stored_bevy_id == 0 || stored_offset != journal_entry.offset) {
+            return GENERIC_ERROR;
+        }
+
+        index_val.bevy_id = stored_bevy_id;
+        index_val.offset = stored_offset;
+        index_val.compressed_size = record_header.compressed_size;
+        index_val.uncompressed_size = record_header.uncompressed_size;
+        index_val.flags = record_header.compression_type;
+        if (corpus_->Put(raw_hash, index_val) != STATUS_OK) {
+            return GENERIC_ERROR;
+        }
+
+        journal_entry.state = JournalStateFromBool(true);
+        if (corpus_->PutMetadata(journal_key, BuildJournalValue(journal_entry)) != STATUS_OK) {
+            return GENERIC_ERROR;
+        }
+
+        ChunkRefV1 ref{stored_bevy_id, stored_offset, chunk_size};
+        if (map_stream.AppendRef(ref) != STATUS_OK) {
+            return GENERIC_ERROR;
+        }
+
+        return STATUS_OK;
+    };
     
     while (true) {
         char next_byte[1];
         size_t read_bytes = 1;
         AFF4Status r_status = input_stream->ReadBuffer(next_byte, &read_bytes);
         if (r_status != STATUS_OK || read_bytes == 0) {
-            // EOF finalize whatever is in buffer
             if (current_chunk_size > 0) {
-                // ... process chunk ...
+                if (process_chunk(buffer.data(), current_chunk_size) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
             }
             break;
         }
@@ -501,97 +812,12 @@ AFF4Status ArchiveChunkStore::IngestStream(
         
         // CDC rolling hash
         hash = (hash << 1) + GEAR_MATRIX[static_cast<uint8_t>(next_byte[0])];
-        bool is_cdc_boundary = (current_chunk_size >= MIN_SIZE) && ((hash & ((1<<21)-1)) == 0); // approx 2MB target
-        bool is_max_boundary = (current_chunk_size >= MAX_SIZE);
+        bool is_cdc_boundary = (current_chunk_size >= kCdcMinSize) && IsCdcBoundary(hash, current_chunk_size);
+        bool is_max_boundary = (current_chunk_size >= kCdcMaxSize);
         
         if (is_cdc_boundary || is_max_boundary) {
-            // Finalize chunk
-            
-            // 1. BLAKE3 raw hash
-            blake3_hasher hasher;
-            blake3_hasher_init(&hasher);
-            blake3_hasher_update(&hasher, buffer.data(), current_chunk_size);
-            uint8_t raw_hash[BLAKE3_OUT_LEN];
-            blake3_hasher_finalize(&hasher, raw_hash, BLAKE3_OUT_LEN);
-            
-            // 2. Lookup in RocksDB
-            ChunkIndexValueV1 index_val;
-            AFF4Status hit = corpus_->Get(raw_hash, &index_val);
-            
-            if (hit == STATUS_OK) {
-                // Hash hit -> Reuse
-                ChunkRefV1 ref;
-                ref.bevy_id = index_val.bevy_id;
-                ref.offset = index_val.offset;
-                ref.uncompressed_size = index_val.uncompressed_size;
-                if (map_stream.AppendRef(ref) != STATUS_OK) {
-                    return GENERIC_ERROR;
-                }
-            } else {
-                // Hash miss -> Compress and write
-                int max_lz4_size = LZ4_compressBound(current_chunk_size);
-                std::vector<uint8_t> compressed(max_lz4_size);
-                int comp_size = LZ4_compress_default((const char*)buffer.data(), (char*)compressed.data(), current_chunk_size, max_lz4_size);
-                
-                ChunkRecordHeaderV1 record_header;
-                record_header.uncompressed_size = current_chunk_size;
-                memcpy(record_header.blake3_hash, raw_hash, 32);
-                memset(record_header.reserved, 0, 3);
-                
-                const uint8_t* payload_ptr;
-                
-                if (comp_size > 0 && comp_size < (int)current_chunk_size) {
-                    record_header.compressed_size = comp_size;
-                    record_header.compression_type = 1; // LZ4
-                    payload_ptr = compressed.data();
-                } else {
-                    record_header.compressed_size = current_chunk_size;
-                    record_header.compression_type = 0; // Raw
-                    payload_ptr = buffer.data();
-                }
-                
-                uint32_t stored_bevy_id = 0;
-                uint64_t stored_offset = 0;
-                
-                {
-                    std::lock_guard<std::mutex> lock(write_mutex_);
-                    if (bevy_writer_->current_size() > 2ULL * 1024 * 1024 * 1024) { // ~2GB bevy limit
-                        const uint32_t next_bevy_id = bevy_writer_->current_bevy_id() + 1;
-                        if (bevy_writer_->FinalizeBevy() != STATUS_OK) {
-                            return GENERIC_ERROR;
-                        }
-                        bevy_writer_ = std::make_unique<BevyWriter>(archive_dir_ + "/bevies", next_bevy_id);
-                        if (bevy_writer_->Initialize() != STATUS_OK) {
-                            return GENERIC_ERROR;
-                        }
-                    }
-                    if (bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset) != STATUS_OK) {
-                        return GENERIC_ERROR;
-                    }
-                }
-
-                if (stored_bevy_id == 0) {
-                    return GENERIC_ERROR;
-                }
-                
-                // Update Index
-                index_val.bevy_id = stored_bevy_id;
-                index_val.offset = stored_offset;
-                index_val.compressed_size = record_header.compressed_size;
-                index_val.uncompressed_size = record_header.uncompressed_size;
-                index_val.flags = record_header.compression_type;
-                if (corpus_->Put(raw_hash, index_val) != STATUS_OK) {
-                    return GENERIC_ERROR;
-                }
-                
-                // Add to Map
-                ChunkRefV1 ref;
-                ref.bevy_id = stored_bevy_id;
-                ref.offset = stored_offset;
-                ref.uncompressed_size = current_chunk_size;
-                if (map_stream.AppendRef(ref) != STATUS_OK) {
-                    return GENERIC_ERROR;
-                }
+            if (process_chunk(buffer.data(), current_chunk_size) != STATUS_OK) {
+                return GENERIC_ERROR;
             }
             
             // Reset for next chunk
@@ -599,65 +825,7 @@ AFF4Status ArchiveChunkStore::IngestStream(
             hash = 0;
         }
     }
-    
-    // Process EOF chunk
-    if (current_chunk_size > 0) {
-        // [REPEAT Finalize logic for EOF...]
-        blake3_hasher hasher;
-        blake3_hasher_init(&hasher);
-        blake3_hasher_update(&hasher, buffer.data(), current_chunk_size);
-        uint8_t raw_hash[BLAKE3_OUT_LEN];
-        blake3_hasher_finalize(&hasher, raw_hash, BLAKE3_OUT_LEN);
-        
-        ChunkIndexValueV1 index_val;
-        if (corpus_->Get(raw_hash, &index_val) == STATUS_OK) {
-            ChunkRefV1 ref = {index_val.bevy_id, index_val.offset, index_val.uncompressed_size};
-            if (map_stream.AppendRef(ref) != STATUS_OK) {
-                return GENERIC_ERROR;
-            }
-        } else {
-            int max_lz4_size = LZ4_compressBound(current_chunk_size);
-            std::vector<uint8_t> compressed(max_lz4_size);
-            int comp_size = LZ4_compress_default((const char*)buffer.data(), (char*)compressed.data(), current_chunk_size, max_lz4_size);
-            
-            ChunkRecordHeaderV1 record_header;
-            record_header.uncompressed_size = current_chunk_size;
-            memcpy(record_header.blake3_hash, raw_hash, 32);
-            memset(record_header.reserved, 0, 3);
-            
-            const uint8_t* payload_ptr;
-            if (comp_size > 0 && comp_size < (int)current_chunk_size) {
-                record_header.compressed_size = comp_size;
-                record_header.compression_type = 1;
-                payload_ptr = compressed.data();
-            } else {
-                record_header.compressed_size = current_chunk_size;
-                record_header.compression_type = 0;
-                payload_ptr = buffer.data();
-            }
-            
-            uint32_t stored_bevy_id = 0;
-            uint64_t stored_offset = 0;
-            {
-                std::lock_guard<std::mutex> lock(write_mutex_);
-                if (bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset) != STATUS_OK) {
-                    return GENERIC_ERROR;
-                }
-            }
-            if (stored_bevy_id == 0) {
-                return GENERIC_ERROR;
-            }
-            index_val = {stored_bevy_id, stored_offset, record_header.compressed_size, record_header.uncompressed_size, record_header.compression_type};
-            if (corpus_->Put(raw_hash, index_val) != STATUS_OK) {
-                return GENERIC_ERROR;
-            }
-            ChunkRefV1 ref = {stored_bevy_id, stored_offset, current_chunk_size};
-            if (map_stream.AppendRef(ref) != STATUS_OK) {
-                return GENERIC_ERROR;
-            }
-        }
-    }
-    
+
     // Save map
     std::string clean_urn = CleanUrnComponent(image_urn);
     std::string map_file = archive_dir_ + "/maps/map_" + clean_urn + ".map.lz4";

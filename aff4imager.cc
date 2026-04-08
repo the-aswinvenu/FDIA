@@ -119,10 +119,13 @@ bool ParseArgs(int argc, char** argv, CliOptions* options, std::string* error) {
 
         if (arg == "--archive-img" || arg == "-a") {
             options->archive_dir = require_value("--archive-img");
+            // options->archive_dir = "/media/unknown/WDBlue1/Archive/"; //Testing only
         } else if (arg == "--extract-img" || arg == "-x") {
             options->extract_dir = require_value("--extract-img");
+            // options->extract_dir = "/media/unknown/WDBlue1/Archive/"; //Testing only
         } else if (arg == "--info") {
             options->info_dir = require_value("--info");
+            // options->info_dir = "/media/unknown/WDBlue1/Archive/"; //Testing only 
         } else if (arg == "--help" || arg == "-h") {
             options->show_help = true;
         } else if (arg.rfind("--", 0) == 0 || (arg.size() > 1 && arg[0] == '-')) {
