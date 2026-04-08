@@ -400,7 +400,29 @@ AFF4Status BasicImager::process_input() {
 
             if (use_archive) {
                 resolver.logger->info("Ingesting {} into archive", input);
-                RETURN_IF_ERROR(archive_store->IngestStream(input_stream.get(), image_urn));
+
+                MultiHasher input_hasher;
+                RETURN_IF_ERROR(input_hasher.AddHashType(HashType::HASH_SHA256));
+                RETURN_IF_ERROR(input_hasher.Init());
+
+                input_stream->Seek(0, SEEK_SET);
+                while (true) {
+                    std::string hash_buffer = input_stream->Read(1024 * 1024);
+                    if (hash_buffer.empty()) {
+                        break;
+                    }
+                    RETURN_IF_ERROR(input_hasher.Update(hash_buffer.data(), hash_buffer.size()));
+                }
+
+                std::vector<AFF4Hash> input_hashes;
+                RETURN_IF_ERROR(input_hasher.Finalize(input_hashes));
+                if (input_hashes.empty()) {
+                    return GENERIC_ERROR;
+                }
+
+                input_stream->Seek(0, SEEK_SET);
+                RETURN_IF_ERROR(archive_store->IngestStream(input_stream.get(), image_urn,
+                                                            input_hashes[0].HexDigest()));
                 resolver.Set(image_urn, AFF4_TYPE, new URN(AFF4_IMAGE_TYPE), false);
                 continue;
             }

@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 #include <filesystem>
 #include <rocksdb/options.h>
 
@@ -85,6 +87,71 @@ static const uint64_t GEAR_MATRIX[256] = {
 };
 
 namespace {
+
+std::string BytesToHex(const uint8_t* data, size_t len) {
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (size_t i = 0; i < len; ++i) {
+        out << std::setw(2) << static_cast<unsigned int>(data[i]);
+    }
+    return out.str();
+}
+
+bool ComputeSha256ForFilePath(const std::string& path, uint8_t out[32]) {
+    FILE* file = fopen(path.c_str(), "rb");
+    if (!file) {
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+
+    std::vector<uint8_t> buffer(1024 * 1024);
+    while (true) {
+        size_t read_bytes = fread(buffer.data(), 1, buffer.size(), file);
+        if (read_bytes > 0) {
+            EVP_DigestUpdate(ctx, buffer.data(), read_bytes);
+        }
+
+        if (read_bytes < buffer.size()) {
+            if (ferror(file) != 0) {
+                fclose(file);
+                EVP_MD_CTX_free(ctx);
+                return false;
+            }
+            break;
+        }
+    }
+
+    unsigned int digest_length = 0;
+    EVP_DigestFinal_ex(ctx, out, &digest_length);
+
+    fclose(file);
+    EVP_MD_CTX_free(ctx);
+    return digest_length == 32;
+}
+
+std::string CleanUrnComponent(const URN& image_urn) {
+    std::string clean_urn = image_urn.SerializeToString();
+    std::replace(clean_urn.begin(), clean_urn.end(), '/', '_');
+    std::replace(clean_urn.begin(), clean_urn.end(), ':', '_');
+    return clean_urn;
+}
+
+std::string CleanUrnComponentFromMapName(const std::string& map_name) {
+    std::string clean = map_name;
+    if (clean.rfind("map_", 0) == 0) {
+        clean = clean.substr(4);
+    }
+
+    const std::string suffix = ".map.lz4";
+    if (clean.size() > suffix.size() &&
+        clean.compare(clean.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        clean.resize(clean.size() - suffix.size());
+    }
+
+    return clean;
+}
 
 void ComputeSha256(const uint8_t* data, size_t length, uint8_t out[32]) {
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
@@ -189,6 +256,23 @@ AFF4Status ChunkCorpus::Get(const uint8_t hash[32], ChunkIndexValueV1* value) {
     return GENERIC_ERROR; // NOT_FOUND or sized mismatched
 }
 
+AFF4Status ChunkCorpus::PutMetadata(const std::string& key, const std::string& value) {
+    if (!db_ || !metadata_cf_) return GENERIC_ERROR;
+
+    rocksdb::Slice metadata_key(key);
+    rocksdb::Slice metadata_value(value);
+    rocksdb::Status status = db_->Put(rocksdb::WriteOptions(), metadata_cf_, metadata_key, metadata_value);
+    return status.ok() ? STATUS_OK : GENERIC_ERROR;
+}
+
+AFF4Status ChunkCorpus::GetMetadata(const std::string& key, std::string* value) {
+    if (!db_ || !metadata_cf_ || !value) return GENERIC_ERROR;
+
+    rocksdb::Slice metadata_key(key);
+    rocksdb::Status status = db_->Get(rocksdb::ReadOptions(), metadata_cf_, metadata_key, value);
+    return status.ok() ? STATUS_OK : GENERIC_ERROR;
+}
+
 // -------------------------------------------------------------
 // BevyWriter
 // -------------------------------------------------------------
@@ -205,23 +289,32 @@ AFF4Status BevyWriter::Initialize() {
     if (!file_) return GENERIC_ERROR;
     char magic[16] = {};
     memcpy(magic, "AFF4BEVY", 8);
-    fwrite(magic, 1, 16, file_);
+    if (fwrite(magic, 1, 16, file_) != 16) {
+        fclose(file_);
+        file_ = nullptr;
+        return GENERIC_ERROR;
+    }
+    chunk_offsets_.clear();
     current_size_ = 16;
     return STATUS_OK;
 }
 
 AFF4Status BevyWriter::AppendChunk(const ChunkRecordHeaderV1& header, const uint8_t* data, uint32_t* out_bevy_id, uint64_t* out_offset) {
-    if (!file_) return GENERIC_ERROR;
+    if (!file_ || !out_bevy_id || !out_offset || !data) return GENERIC_ERROR;
     *out_bevy_id = bevy_id_;
     *out_offset = current_size_;
     
     chunk_offsets_.push_back(current_size_);
 
-    fwrite(&header, 1, sizeof(header), file_);
+    if (fwrite(&header, 1, sizeof(header), file_) != sizeof(header)) {
+        return GENERIC_ERROR;
+    }
     current_size_ += sizeof(header);
     
     uint32_t payload_len = (header.compression_type == 0) ? header.uncompressed_size : header.compressed_size;
-    fwrite(data, 1, payload_len, file_);
+    if (fwrite(data, 1, payload_len, file_) != payload_len) {
+        return GENERIC_ERROR;
+    }
     current_size_ += payload_len;
     
     return STATUS_OK;
@@ -258,6 +351,7 @@ AFF4Status BevyWriter::FinalizeBevy() {
 
     fclose(file_);
     file_ = nullptr;
+    chunk_offsets_.clear();
     return STATUS_OK;
 }
 
@@ -378,7 +472,8 @@ AFF4Status ArchiveChunkStore::Initialize() {
     return STATUS_OK;
 }
 
-AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_urn) {
+AFF4Status ArchiveChunkStore::IngestStream(
+    AFF4Stream* input_stream, URN image_urn, const std::string& expected_input_sha256_hex) {
     if (!input_stream || !corpus_ || !bevy_writer_) return GENERIC_ERROR;
     
     ArchiveMapStream map_stream(resolver_, image_urn);
@@ -429,7 +524,9 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
                 ref.bevy_id = index_val.bevy_id;
                 ref.offset = index_val.offset;
                 ref.uncompressed_size = index_val.uncompressed_size;
-                map_stream.AppendRef(ref);
+                if (map_stream.AppendRef(ref) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
             } else {
                 // Hash miss -> Compress and write
                 int max_lz4_size = LZ4_compressBound(current_chunk_size);
@@ -459,11 +556,22 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
                 {
                     std::lock_guard<std::mutex> lock(write_mutex_);
                     if (bevy_writer_->current_size() > 2ULL * 1024 * 1024 * 1024) { // ~2GB bevy limit
-                        bevy_writer_->FinalizeBevy();
-                        bevy_writer_ = std::make_unique<BevyWriter>(archive_dir_ + "/bevies", bevy_writer_->current_bevy_id() + 1);
-                        bevy_writer_->Initialize();
+                        const uint32_t next_bevy_id = bevy_writer_->current_bevy_id() + 1;
+                        if (bevy_writer_->FinalizeBevy() != STATUS_OK) {
+                            return GENERIC_ERROR;
+                        }
+                        bevy_writer_ = std::make_unique<BevyWriter>(archive_dir_ + "/bevies", next_bevy_id);
+                        if (bevy_writer_->Initialize() != STATUS_OK) {
+                            return GENERIC_ERROR;
+                        }
                     }
-                    bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset);
+                    if (bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset) != STATUS_OK) {
+                        return GENERIC_ERROR;
+                    }
+                }
+
+                if (stored_bevy_id == 0) {
+                    return GENERIC_ERROR;
                 }
                 
                 // Update Index
@@ -472,14 +580,18 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
                 index_val.compressed_size = record_header.compressed_size;
                 index_val.uncompressed_size = record_header.uncompressed_size;
                 index_val.flags = record_header.compression_type;
-                corpus_->Put(raw_hash, index_val);
+                if (corpus_->Put(raw_hash, index_val) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
                 
                 // Add to Map
                 ChunkRefV1 ref;
                 ref.bevy_id = stored_bevy_id;
                 ref.offset = stored_offset;
                 ref.uncompressed_size = current_chunk_size;
-                map_stream.AppendRef(ref);
+                if (map_stream.AppendRef(ref) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
             }
             
             // Reset for next chunk
@@ -500,7 +612,9 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
         ChunkIndexValueV1 index_val;
         if (corpus_->Get(raw_hash, &index_val) == STATUS_OK) {
             ChunkRefV1 ref = {index_val.bevy_id, index_val.offset, index_val.uncompressed_size};
-            map_stream.AppendRef(ref);
+            if (map_stream.AppendRef(ref) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
         } else {
             int max_lz4_size = LZ4_compressBound(current_chunk_size);
             std::vector<uint8_t> compressed(max_lz4_size);
@@ -526,28 +640,39 @@ AFF4Status ArchiveChunkStore::IngestStream(AFF4Stream* input_stream, URN image_u
             uint64_t stored_offset = 0;
             {
                 std::lock_guard<std::mutex> lock(write_mutex_);
-                bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset);
+                if (bevy_writer_->AppendChunk(record_header, payload_ptr, &stored_bevy_id, &stored_offset) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
+            }
+            if (stored_bevy_id == 0) {
+                return GENERIC_ERROR;
             }
             index_val = {stored_bevy_id, stored_offset, record_header.compressed_size, record_header.uncompressed_size, record_header.compression_type};
-            corpus_->Put(raw_hash, index_val);
+            if (corpus_->Put(raw_hash, index_val) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
             ChunkRefV1 ref = {stored_bevy_id, stored_offset, current_chunk_size};
-            map_stream.AppendRef(ref);
+            if (map_stream.AppendRef(ref) != STATUS_OK) {
+                return GENERIC_ERROR;
+            }
         }
     }
     
     // Save map
-    std::string clean_urn = image_urn.SerializeToString();
-    std::replace(clean_urn.begin(), clean_urn.end(), '/', '_');
-    std::replace(clean_urn.begin(), clean_urn.end(), ':', '_');
+    std::string clean_urn = CleanUrnComponent(image_urn);
     std::string map_file = archive_dir_ + "/maps/map_" + clean_urn + ".map.lz4";
     if (map_stream.FinalizeMap(map_file) != STATUS_OK) {
         return GENERIC_ERROR;
     }
 
-    if (bevy_writer_->FinalizeBevy() != STATUS_OK) {
-        std::cerr << "Failed to finalize bevy\n";
-        return GENERIC_ERROR;
+    if (!expected_input_sha256_hex.empty()) {
+        const std::string metadata_key = "file_sha256:" + clean_urn;
+        if (corpus_->PutMetadata(metadata_key, expected_input_sha256_hex) != STATUS_OK) {
+            std::cerr << "Failed to persist SHA-256 metadata for " << clean_urn << "\n";
+            return GENERIC_ERROR;
+        }
     }
+
     return STATUS_OK;
 }
 
@@ -733,6 +858,39 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
     }
 
     fclose(out_f);
+
+    ChunkCorpus corpus(archive_dir_ + "/chunk_corpus");
+    if (corpus.Initialize() != STATUS_OK) {
+        std::cerr << "Fail 12: Cannot initialize metadata store for integrity verification\n";
+        return GENERIC_ERROR;
+    }
+
+    const std::string clean_urn = CleanUrnComponentFromMapName(map_name);
+    const std::string metadata_key = "file_sha256:" + clean_urn;
+    std::string expected_hash_hex;
+    if (corpus.GetMetadata(metadata_key, &expected_hash_hex) != STATUS_OK) {
+        std::cerr << "Fail 13: Missing stored SHA-256 metadata for map " << map_name << "\n";
+        return GENERIC_ERROR;
+    }
+
+    uint8_t extracted_hash[32] = {};
+    if (!ComputeSha256ForFilePath(output_path, extracted_hash)) {
+        std::cerr << "Fail 14: Cannot compute SHA-256 for extracted output\n";
+        return GENERIC_ERROR;
+    }
+
+    const std::string extracted_hash_hex = BytesToHex(extracted_hash, sizeof(extracted_hash));
+    if (expected_hash_hex != extracted_hash_hex) {
+        std::cerr << "Fail 15: SHA-256 integrity verification failed\n"
+                  << "  Stored   : " << expected_hash_hex << "\n"
+                  << "  Extracted: " << extracted_hash_hex << "\n";
+        return GENERIC_ERROR;
+    }
+
+    std::cout << "SHA-256 integrity verification passed for extracted file.\n"
+              << "  Stored   : " << expected_hash_hex << "\n"
+              << "  Extracted: " << extracted_hash_hex << "\n";
+
     return STATUS_OK;
 }
 

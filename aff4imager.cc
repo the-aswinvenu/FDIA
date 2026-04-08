@@ -23,17 +23,21 @@ specific language governing permissions and limitations under the License.
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <lz4.h>
 #include <iostream>
+#include <openssl/evp.h>
 #include <rocksdb/db.h>
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace {
 
 struct CliOptions {
+    bool show_help = false;
     std::string archive_dir;
     std::string extract_dir;
     std::string info_dir;
@@ -48,6 +52,60 @@ std::string SanitizeComponent(std::string value) {
     return value;
 }
 
+bool ComputeFileSha256Hex(const std::string& path, std::string* out_hex) {
+    if (!out_hex) {
+        return false;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+
+    std::vector<char> buffer(1024 * 1024);
+    while (file) {
+        file.read(buffer.data(), buffer.size());
+        std::streamsize count = file.gcount();
+        if (count > 0) {
+            EVP_DigestUpdate(ctx, buffer.data(), static_cast<size_t>(count));
+        }
+    }
+
+    if (!file.eof()) {
+        EVP_MD_CTX_free(ctx);
+        return false;
+    }
+
+    uint8_t digest[32] = {};
+    unsigned int digest_length = 0;
+    EVP_DigestFinal_ex(ctx, digest, &digest_length);
+    EVP_MD_CTX_free(ctx);
+
+    if (digest_length != 32) {
+        return false;
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (uint8_t byte : digest) {
+        out << std::setw(2) << static_cast<unsigned int>(byte);
+    }
+
+    *out_hex = out.str();
+    return true;
+}
+
+void PrintUsage(const char* argv0) {
+    std::cerr << "Usage:\n";
+    std::cerr << "  " << argv0 << " --archive-img|-a <dir> <inputs...>\n";
+    std::cerr << "  " << argv0 << " --extract-img|-x <dir> <map_name> <output_path>\n";
+    std::cerr << "  " << argv0 << " --info <dir>\n";
+    std::cerr << "  " << argv0 << " --help|-h\n";
+}
+
 bool ParseArgs(int argc, char** argv, CliOptions* options, std::string* error) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -59,16 +117,14 @@ bool ParseArgs(int argc, char** argv, CliOptions* options, std::string* error) {
             return argv[++i];
         };
 
-        if (arg == "--archive" || arg == "-A") {
-            options->archive_dir = require_value("--archive");
-        } else if (arg == "--extract-archive" || arg == "-E") {
-            options->extract_dir = require_value("--extract-archive");
-        } else if (arg == "--info" || arg == "-I") {
+        if (arg == "--archive-img" || arg == "-a") {
+            options->archive_dir = require_value("--archive-img");
+        } else if (arg == "--extract-img" || arg == "-x") {
+            options->extract_dir = require_value("--extract-img");
+        } else if (arg == "--info") {
             options->info_dir = require_value("--info");
-        } else if (arg == "--map" || arg == "-M") {
-            options->map_name = require_value("--map");
-        } else if (arg == "--output" || arg == "-o") {
-            options->output_path = require_value("--output");
+        } else if (arg == "--help" || arg == "-h") {
+            options->show_help = true;
         } else if (arg.rfind("--", 0) == 0 || (arg.size() > 1 && arg[0] == '-')) {
             *error = std::string("Unknown flag: ") + arg;
             return false;
@@ -81,8 +137,12 @@ bool ParseArgs(int argc, char** argv, CliOptions* options, std::string* error) {
     const bool extract_mode = !options->extract_dir.empty();
     const bool info_mode = !options->info_dir.empty();
 
+    if (options->show_help) {
+        return true;
+    }
+
     if ((ingest_mode + extract_mode + info_mode) != 1) {
-        *error = "Specify exactly one of --archive, --extract-archive, or --info.";
+        *error = "Specify exactly one of --archive-img, --extract-img, or --info.";
         return false;
     }
 
@@ -92,14 +152,13 @@ bool ParseArgs(int argc, char** argv, CliOptions* options, std::string* error) {
     }
 
     if (extract_mode) {
-        if (options->map_name.empty()) {
-            *error = "Archive extraction requires --map.";
+        if (options->inputs.size() != 2) {
+            *error = "Archive extraction requires <map_name> and <output_path>.";
             return false;
         }
-        if (options->output_path.empty()) {
-            *error = "Archive extraction requires --output.";
-            return false;
-        }
+        options->map_name = options->inputs[0];
+        options->output_path = options->inputs[1];
+        options->inputs.clear();
     }
 
     if (info_mode && !options->inputs.empty()) {
@@ -126,6 +185,12 @@ int RunIngest(const CliOptions& options) {
     }
 
     for (const std::string& input_path : options.inputs) {
+        std::string input_sha256_hex;
+        if (!ComputeFileSha256Hex(input_path, &input_sha256_hex)) {
+            std::cerr << "Failed to compute SHA-256 before ingest: " << input_path << "\n";
+            return 1;
+        }
+
         aff4::AFF4Flusher<aff4::FileBackedObject> input_stream;
         if (aff4::NewFileBackedObject(&resolver, input_path, "read", input_stream) != aff4::STATUS_OK) {
             std::cerr << "Failed to open input: " << input_path << "\n";
@@ -133,7 +198,7 @@ int RunIngest(const CliOptions& options) {
         }
 
         aff4::URN image_urn = BuildImageUrn(input_path);
-        if (archive_store.IngestStream(input_stream.get(), image_urn) != aff4::STATUS_OK) {
+        if (archive_store.IngestStream(input_stream.get(), image_urn, input_sha256_hex) != aff4::STATUS_OK) {
             std::cerr << "Failed to ingest input: " << input_path << "\n";
             return 1;
         }
@@ -308,11 +373,13 @@ int main(int argc, char** argv) {
     std::string error;
     if (!ParseArgs(argc, argv, &options, &error)) {
         std::cerr << error << "\n";
-        std::cerr << "Usage:\n";
-        std::cerr << "  " << argv[0] << " --archive <dir> <inputs...>\n";
-        std::cerr << "  " << argv[0] << " --extract-archive <dir> --map <name> --output <path>\n";
-        std::cerr << "  " << argv[0] << " --info <dir>\n";
+        PrintUsage(argv[0]);
         return 1;
+    }
+
+    if (options.show_help) {
+        PrintUsage(argv[0]);
+        return 0;
     }
 
     if (!options.archive_dir.empty()) {

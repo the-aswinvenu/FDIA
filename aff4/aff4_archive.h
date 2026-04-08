@@ -99,6 +99,8 @@ public:
     AFF4Status Initialize();
     AFF4Status Put(const uint8_t hash[32], const ChunkIndexValueV1& value);
     AFF4Status Get(const uint8_t hash[32], ChunkIndexValueV1* value);
+    AFF4Status PutMetadata(const std::string& key, const std::string& value);
+    AFF4Status GetMetadata(const std::string& key, std::string* value);
     void Close();
 
 private:
@@ -153,7 +155,8 @@ public:
     ~ArchiveChunkStore();
 
     AFF4Status Initialize();
-    AFF4Status IngestStream(AFF4Stream* input_stream, URN image_urn);
+    AFF4Status IngestStream(AFF4Stream* input_stream, URN image_urn,
+                            const std::string& expected_input_sha256_hex);
 
 private:
     DataStore* resolver_;
