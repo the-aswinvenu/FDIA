@@ -27,7 +27,6 @@ specific language governing permissions and limitations under the License.
 #include "data_store.h"
 #include "zip.h"
 #include "lexicon.h"
-#include "aff4_archive.h"
 
 
 namespace aff4 {

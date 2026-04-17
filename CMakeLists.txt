@@ -91,33 +91,37 @@ file(WRITE ${CONFIG_H}
 "
 )
 
-# ---- Core Library Sources ----
+# ---- Core AFF4 Library Sources ----
 set(AFF4_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/compatibility.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/data_store.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/lexicon.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/rdf.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/zip.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_directory.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_file.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_map.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_symstream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_image.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_init.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/volume_group.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/libaff4.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/tclap_parsers.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_hash.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4_archive.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/compatibility.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/data_store.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/lexicon.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/rdf.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/zip.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_directory.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_file.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_map.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_symstream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_image.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_init.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/volume_group.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/libaff4.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/tclap_parsers.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_hash.cc
 )
 
-# ---- Create Library Target ----
+# ---- Create Library Targets ----
 add_library(aff4 STATIC ${AFF4_SOURCES})
+
+set(ARCHIVE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/archive/archive.cc
+)
+add_library(archive STATIC ${ARCHIVE_SOURCES})
 
 # ---- Include Directories ----
 target_include_directories(aff4 
     PUBLIC 
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<INSTALL_INTERFACE:include>
     PRIVATE
@@ -131,23 +135,38 @@ target_include_directories(aff4
         ${blake3_SOURCE_DIR}/c
 )
 
+target_include_directories(archive
+    PUBLIC 
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
+        $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${ROCKSDB_INCLUDE_DIRS}
+        ${blake3_SOURCE_DIR}/c
+)
+
 # ---- Link Libraries ----
 target_link_libraries(aff4 
     PUBLIC
         ${RAPTOR2_LIBRARIES}
         ${ZLIB_LIBRARIES}
-        ${SNAPPY_LIB}
-        ${LZ4_LIB}
         ${TCLAP_LIBRARIES}
         ${SPDLOG_LIBRARIES}
         ${URIPARSER_LIBRARIES}
         ${UUID_LIBRARIES}
         ${FMT_LIB}
-        ${ROCKSDB_LIB}
-        ${BLAKE3_LIB}
         Threads::Threads
         OpenSSL::SSL
         OpenSSL::Crypto
+)
+
+target_link_libraries(archive
+    PUBLIC
+        aff4
+        ${SNAPPY_LIB}
+        ${LZ4_LIB}
+        ${ROCKSDB_LIB}
+        ${BLAKE3_LIB}
 )
 
 # ---- Compiler Flags ----
@@ -164,8 +183,8 @@ endif()
 
 # ---- Build Executables ----
 if(BUILD_EXECUTABLES)
-    add_executable(aff4imager ${CMAKE_CURRENT_SOURCE_DIR}/aff4imager.cc)
-    target_link_libraries(aff4imager PRIVATE aff4)
+    add_executable(aff4imager ${CMAKE_CURRENT_SOURCE_DIR}/cli/main.cc)
+    target_link_libraries(aff4imager PRIVATE archive)
 
     # Installation
     install(TARGETS aff4imager DESTINATION bin)
@@ -178,12 +197,12 @@ if(BUILD_DEBUG_TOOLS)
         ${CMAKE_BINARY_DIR}
         ${blake3_SOURCE_DIR}/c
     )
-    target_link_libraries(archive_debug PRIVATE aff4)
+    target_link_libraries(archive_debug PRIVATE archive)
 endif()
 
 # ---- Installation ----
 # Install library
-install(TARGETS aff4
+install(TARGETS aff4 archive
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin

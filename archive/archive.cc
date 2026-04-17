@@ -1,4 +1,4 @@
-#include "aff4/aff4_archive.h"
+#include "archive/archive.h"
 #include <blake3.h>
 #include <lz4.h>
 #include <openssl/evp.h>
@@ -332,7 +332,7 @@ void ChunkCorpus::Close() {
     }
 }
 
-AFF4Status ChunkCorpus::Put(const uint8_t hash[32], const ChunkIndexValueV1& value) {
+AFF4Status ChunkCorpus::Put(const uint8_t hash[32], const ChunkIndexValue& value) {
     if (!db_ || !chunk_index_cf_) return GENERIC_ERROR;
     rocksdb::Slice key((const char*)hash, 32);
     rocksdb::Slice val((const char*)&value, sizeof(value));
@@ -340,13 +340,13 @@ AFF4Status ChunkCorpus::Put(const uint8_t hash[32], const ChunkIndexValueV1& val
     return s.ok() ? STATUS_OK : GENERIC_ERROR;
 }
 
-AFF4Status ChunkCorpus::Get(const uint8_t hash[32], ChunkIndexValueV1* value) {
+AFF4Status ChunkCorpus::Get(const uint8_t hash[32], ChunkIndexValue* value) {
     if (!db_ || !chunk_index_cf_) return GENERIC_ERROR;
     rocksdb::Slice key((const char*)hash, 32);
     std::string val;
     rocksdb::Status s = db_->Get(rocksdb::ReadOptions(), chunk_index_cf_, key, &val);
-    if (s.ok() && val.size() == sizeof(ChunkIndexValueV1)) {
-        memcpy(value, val.data(), sizeof(ChunkIndexValueV1));
+    if (s.ok() && val.size() == sizeof(ChunkIndexValue)) {
+        memcpy(value, val.data(), sizeof(ChunkIndexValue));
         return STATUS_OK;
     }
     return GENERIC_ERROR; // NOT_FOUND or sized mismatched
@@ -419,7 +419,7 @@ AFF4Status BevyWriter::Initialize() {
     return STATUS_OK;
 }
 
-AFF4Status BevyWriter::AppendChunk(const ChunkRecordHeaderV1& header, const uint8_t* data, uint32_t* out_bevy_id, uint64_t* out_offset) {
+AFF4Status BevyWriter::AppendChunk(const ChunkRecordHeader& header, const uint8_t* data, uint32_t* out_bevy_id, uint64_t* out_offset) {
     if (!file_ || !out_bevy_id || !out_offset || !data) return GENERIC_ERROR;
     *out_bevy_id = bevy_id_;
     *out_offset = current_size_;
@@ -452,7 +452,7 @@ AFF4Status BevyWriter::FinalizeBevy() {
         current_size_ += sizeof(offset);
     }
 
-    BevyFooterV1 footer{};
+    BevyFooter footer{};
     footer.chunk_count = chunk_offsets_.size();
     footer.bevy_size = current_size_ + sizeof(footer);
     footer.index_offset = index_offset;
@@ -481,7 +481,7 @@ AFF4Status BevyWriter::FinalizeBevy() {
 ArchiveMapStream::ArchiveMapStream(DataStore* resolver, URN urn) : AFF4Stream(resolver, urn) {}
 ArchiveMapStream::~ArchiveMapStream() {}
 
-AFF4Status ArchiveMapStream::AppendRef(const ChunkRefV1& ref) {
+AFF4Status ArchiveMapStream::AppendRef(const ChunkRef& ref) {
     current_segment_refs_.push_back(ref);
     logical_offset_ += ref.uncompressed_size;
     return STATUS_OK;
@@ -493,14 +493,14 @@ AFF4Status ArchiveMapStream::FinalizeMap(const std::string& path) {
 
     std::vector<uint8_t> map_data;
 
-    MapStreamHeaderV1 header{};
+    MapStreamHeader header{};
     memcpy(header.magic, "AFF4MAP1", sizeof(header.magic));
     header.logical_size = logical_offset_;
     header.segment_count = 1;
     header.reserved = 0;
     AppendBytes(map_data, &header, sizeof(header));
 
-    SegmentHeaderV1 segment{};
+    SegmentHeader segment{};
     segment.logical_offset = 0;
     segment.chunk_count = current_segment_refs_.size();
     AppendBytes(map_data, &segment, sizeof(segment));
@@ -509,7 +509,7 @@ AFF4Status ArchiveMapStream::FinalizeMap(const std::string& path) {
         AppendBytes(map_data, &ref, sizeof(ref));
     }
 
-    MapStreamFooterV1 footer{};
+    MapStreamFooter footer{};
     footer.chunk_count = current_segment_refs_.size();
     footer.logical_size = logical_offset_;
     footer.data_size = map_data.size() + sizeof(footer);
@@ -633,7 +633,7 @@ AFF4Status ArchiveChunkStore::RecoverChunkJournal() {
             continue;
         }
 
-        ChunkRecordHeaderV1 header{};
+        ChunkRecordHeader header{};
         if (fread(&header, 1, sizeof(header), bevy_file) != sizeof(header)) {
             fclose(bevy_file);
             journal_entry.state = "ABORTED";
@@ -653,7 +653,7 @@ AFF4Status ArchiveChunkStore::RecoverChunkJournal() {
 
         fclose(bevy_file);
 
-        ChunkIndexValueV1 index_val{};
+        ChunkIndexValue index_val{};
         index_val.bevy_id = journal_entry.bevy_id;
         index_val.offset = journal_entry.offset;
         index_val.compressed_size = journal_entry.compressed_size;
@@ -700,9 +700,9 @@ AFF4Status ArchiveChunkStore::IngestStream(
         uint8_t raw_hash[BLAKE3_OUT_LEN];
         blake3_hasher_finalize(&hasher, raw_hash, BLAKE3_OUT_LEN);
 
-        ChunkIndexValueV1 index_val;
+        ChunkIndexValue index_val;
         if (corpus_->Get(raw_hash, &index_val) == STATUS_OK) {
-            ChunkRefV1 ref{index_val.bevy_id, index_val.offset, index_val.uncompressed_size};
+            ChunkRef ref{index_val.bevy_id, index_val.offset, index_val.uncompressed_size};
             if (map_stream.AppendRef(ref) != STATUS_OK) {
                 return GENERIC_ERROR;
             }
@@ -717,7 +717,7 @@ AFF4Status ArchiveChunkStore::IngestStream(
             chunk_size,
             max_lz4_size);
 
-        ChunkRecordHeaderV1 record_header{};
+        ChunkRecordHeader record_header{};
         record_header.uncompressed_size = chunk_size;
         memcpy(record_header.blake3_hash, raw_hash, 32);
         memset(record_header.reserved, 0, 3);
@@ -787,7 +787,7 @@ AFF4Status ArchiveChunkStore::IngestStream(
             return GENERIC_ERROR;
         }
 
-        ChunkRefV1 ref{stored_bevy_id, stored_offset, chunk_size};
+        ChunkRef ref{stored_bevy_id, stored_offset, chunk_size};
         if (map_stream.AppendRef(ref) != STATUS_OK) {
             return GENERIC_ERROR;
         }
@@ -869,7 +869,7 @@ AFF4Status ArchiveExtractor::ValidateBevy(FILE* bevy_file, uint32_t bevy_id) {
     }
 
     uint64_t file_size = static_cast<uint64_t>(file_size_long);
-    if (file_size < 16 + sizeof(BevyFooterV1)) {
+    if (file_size < 16 + sizeof(BevyFooter)) {
         return GENERIC_ERROR;
     }
 
@@ -885,21 +885,21 @@ AFF4Status ArchiveExtractor::ValidateBevy(FILE* bevy_file, uint32_t bevy_id) {
         return GENERIC_ERROR;
     }
 
-    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooterV1)), SEEK_SET) != 0) {
+    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooter)), SEEK_SET) != 0) {
         return GENERIC_ERROR;
     }
 
-    BevyFooterV1 footer{};
+    BevyFooter footer{};
     if (fread(&footer, 1, sizeof(footer), bevy_file) != sizeof(footer)) {
         return GENERIC_ERROR;
     }
 
-    if (footer.bevy_size != file_size || footer.index_offset < 16 || footer.index_offset >= file_size - sizeof(BevyFooterV1)) {
+    if (footer.bevy_size != file_size || footer.index_offset < 16 || footer.index_offset >= file_size - sizeof(BevyFooter)) {
         return GENERIC_ERROR;
     }
 
     std::vector<uint8_t> computed_sha(32);
-    if (!ComputeSha256ForFilePrefix(bevy_file, file_size - sizeof(BevyFooterV1), computed_sha.data())) {
+    if (!ComputeSha256ForFilePrefix(bevy_file, file_size - sizeof(BevyFooter), computed_sha.data())) {
         return GENERIC_ERROR;
     }
 
@@ -958,20 +958,20 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
 
     std::vector<uint8_t> uncompressed(uncompressed_size);
     int res = LZ4_decompress_safe((const char*)compressed.data(), (char*)uncompressed.data(), compressed_size, uncompressed_size);
-    if (res < 0 || uncompressed_size < sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1) + sizeof(MapStreamFooterV1)) { std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n"; return GENERIC_ERROR; }
+    if (res < 0 || uncompressed_size < sizeof(MapStreamHeader) + sizeof(SegmentHeader) + sizeof(MapStreamFooter)) { std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n"; return GENERIC_ERROR; }
 
-    MapStreamHeaderV1* map_header = reinterpret_cast<MapStreamHeaderV1*>(uncompressed.data());
+    MapStreamHeader* map_header = reinterpret_cast<MapStreamHeader*>(uncompressed.data());
     if (memcmp(map_header->magic, "AFF4MAP1", sizeof(map_header->magic)) != 0) { std::cerr<<"Fail 5: Magic mismatch\n"; return GENERIC_ERROR; }
 
-    MapStreamFooterV1* footer = reinterpret_cast<MapStreamFooterV1*>(uncompressed.data() + uncompressed_size - sizeof(MapStreamFooterV1));
+    MapStreamFooter* footer = reinterpret_cast<MapStreamFooter*>(uncompressed.data() + uncompressed_size - sizeof(MapStreamFooter));
     if (footer->data_size != uncompressed_size || footer->logical_size != map_header->logical_size) { std::cerr<<"Fail 5b: Map footer mismatch\n"; return GENERIC_ERROR; }
 
     std::vector<uint8_t> computed_sha(32);
-    ComputeSha256(uncompressed.data(), uncompressed_size - sizeof(MapStreamFooterV1), computed_sha.data());
+    ComputeSha256(uncompressed.data(), uncompressed_size - sizeof(MapStreamFooter), computed_sha.data());
     if (memcmp(computed_sha.data(), footer->sha256, 32) != 0) { std::cerr<<"Fail 5c: Map checksum mismatch\n"; return GENERIC_ERROR; }
 
-    SegmentHeaderV1* seg = reinterpret_cast<SegmentHeaderV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1));
-    ChunkRefV1* refs = reinterpret_cast<ChunkRefV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1));
+    SegmentHeader* seg = reinterpret_cast<SegmentHeader*>(uncompressed.data() + sizeof(MapStreamHeader));
+    ChunkRef* refs = reinterpret_cast<ChunkRef*>(uncompressed.data() + sizeof(MapStreamHeader) + sizeof(SegmentHeader));
 
     if (seg->chunk_count != footer->chunk_count || map_header->segment_count != 1 || seg->logical_offset != 0 || map_header->logical_size != footer->logical_size) {
         std::cerr << "Fail 5c: Map segment metadata mismatch\n";
@@ -982,14 +982,14 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
     if (!out_f) { std::cerr<<"Fail 6: Cannot open output\n"; return GENERIC_ERROR; }
 
     for (uint32_t i = 0; i < seg->chunk_count; i++) {
-        const ChunkRefV1& ref = refs[i];
+        const ChunkRef& ref = refs[i];
         FILE* bevy_f = GetBevyFile(ref.bevy_id);
         if (!bevy_f) {
             fclose(out_f); std::cerr<<"Fail 7: Cannot open bevy_id="<<ref.bevy_id<<"\n"; return GENERIC_ERROR;
         }
 
         fseek(bevy_f, ref.offset, SEEK_SET);
-        ChunkRecordHeaderV1 header;
+        ChunkRecordHeader header;
         if (fread(&header, 1, sizeof(header), bevy_f) != sizeof(header)) {
             fclose(out_f); std::cerr<<"Fail 8 at offset "<<ref.offset<<"\n"; return GENERIC_ERROR;
         }

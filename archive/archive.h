@@ -2,8 +2,8 @@
 #define SRC_AFF4_ARCHIVE_H_
 
 // #include "aff4/config.h"
-#include "aff4_io.h"
-#include "data_store.h"
+#include "aff4/aff4_io.h"
+#include "aff4/data_store.h"
 #include <rocksdb/db.h>
 #include <vector>
 #include <string>
@@ -38,7 +38,7 @@ namespace aff4 {
 #pragma pack(push, 1)
 
 // Value stored in RocksDB
-struct ChunkIndexValueV1 {
+struct ChunkIndexValue {
     uint32_t bevy_id;
     uint64_t offset;
     uint32_t compressed_size;
@@ -47,7 +47,7 @@ struct ChunkIndexValueV1 {
 };
 
 // Chunk header stored in Bevy
-struct ChunkRecordHeaderV1 {
+struct ChunkRecordHeader {
     uint32_t compressed_size;
     uint32_t uncompressed_size;
     uint8_t compression_type; // 0=raw, 1=lz4
@@ -56,7 +56,7 @@ struct ChunkRecordHeaderV1 {
 };
 
 // Bevy footer
-struct BevyFooterV1 {
+struct BevyFooter {
     uint64_t chunk_count;
     uint64_t bevy_size;
     uint64_t index_offset;
@@ -64,26 +64,26 @@ struct BevyFooterV1 {
 };
 
 // Map stream segment header
-struct SegmentHeaderV1 {
+struct SegmentHeader {
     uint64_t logical_offset;
     uint32_t chunk_count;
 };
 
 // Map stream chunk reference
-struct ChunkRefV1 {
+struct ChunkRef {
     uint32_t bevy_id;
     uint64_t offset;
     uint32_t uncompressed_size;
 };
 
-struct MapStreamHeaderV1 {
+struct MapStreamHeader {
     uint8_t magic[8];
     uint64_t logical_size;
     uint32_t segment_count;
     uint32_t reserved;
 };
 
-struct MapStreamFooterV1 {
+struct MapStreamFooter {
     uint64_t chunk_count;
     uint64_t logical_size;
     uint64_t data_size;
@@ -98,8 +98,8 @@ public:
     ~ChunkCorpus();
 
     AFF4Status Initialize();
-    AFF4Status Put(const uint8_t hash[32], const ChunkIndexValueV1& value);
-    AFF4Status Get(const uint8_t hash[32], ChunkIndexValueV1* value);
+    AFF4Status Put(const uint8_t hash[32], const ChunkIndexValue& value);
+    AFF4Status Get(const uint8_t hash[32], ChunkIndexValue* value);
     AFF4Status PutMetadata(const std::string& key, const std::string& value);
     AFF4Status GetMetadata(const std::string& key, std::string* value);
     AFF4Status ListMetadataPrefix(const std::string& prefix,
@@ -120,7 +120,7 @@ public:
     ~BevyWriter();
 
     AFF4Status Initialize();
-    AFF4Status AppendChunk(const ChunkRecordHeaderV1& header, const uint8_t* data, uint32_t* out_bevy_id, uint64_t* out_offset);
+    AFF4Status AppendChunk(const ChunkRecordHeader& header, const uint8_t* data, uint32_t* out_bevy_id, uint64_t* out_offset);
     AFF4Status FinalizeBevy();
 
     uint64_t current_size() const { return current_size_; }
@@ -139,7 +139,7 @@ public:
     ArchiveMapStream(DataStore* resolver, URN urn);
     virtual ~ArchiveMapStream();
 
-    AFF4Status AppendRef(const ChunkRefV1& ref);
+    AFF4Status AppendRef(const ChunkRef& ref);
     AFF4Status FinalizeMap(const std::string& path);
     // Inherited
     virtual AFF4Status ReadBuffer(char* data, size_t* length) override;
@@ -148,7 +148,7 @@ public:
     virtual aff4_off_t Size() const override;
 
 private:
-    std::vector<ChunkRefV1> current_segment_refs_;
+    std::vector<ChunkRef> current_segment_refs_;
     uint64_t logical_offset_ = 0;
 };
 

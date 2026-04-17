@@ -1,4 +1,4 @@
-#include "aff4/aff4_archive.h"
+#include "archive/archive.h"
 
 #include <blake3.h>
 #include <lz4.h>
@@ -15,24 +15,24 @@
 
 namespace {
 
-using aff4::BevyFooterV1;
-using aff4::ChunkRecordHeaderV1;
-using aff4::ChunkRefV1;
+using aff4::BevyFooter;
+using aff4::ChunkRecordHeader;
+using aff4::ChunkRef;
 
 #pragma pack(push, 1)
-struct MapStreamHeaderV1 {
+struct MapStreamHeader {
     uint8_t magic[8];
     uint64_t logical_size;
     uint32_t segment_count;
     uint32_t reserved;
 };
 
-struct SegmentHeaderV1 {
+struct SegmentHeader {
     uint64_t logical_offset;
     uint32_t chunk_count;
 };
 
-struct MapStreamFooterV1 {
+struct MapStreamFooter {
     uint64_t chunk_count;
     uint64_t logical_size;
     uint64_t data_size;
@@ -111,10 +111,10 @@ bool ReadEntireFile(const std::filesystem::path& path, std::vector<uint8_t>* dat
 }
 
 bool LoadMapFile(const std::filesystem::path& path,
-                 MapStreamHeaderV1* header,
-                 SegmentHeaderV1* segment,
-                 MapStreamFooterV1* footer,
-                 std::vector<ChunkRefV1>* refs,
+                 MapStreamHeader* header,
+                 SegmentHeader* segment,
+                 MapStreamFooter* footer,
+                 std::vector<ChunkRef>* refs,
                  std::vector<uint8_t>* uncompressed,
                  std::string* error) {
     std::ifstream file(path, std::ios::binary);
@@ -156,19 +156,19 @@ bool LoadMapFile(const std::filesystem::path& path,
         return false;
     }
 
-    if (compressed_prefix_size < sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1) + sizeof(MapStreamFooterV1)) {
+    if (compressed_prefix_size < sizeof(MapStreamHeader) + sizeof(SegmentHeader) + sizeof(MapStreamFooter)) {
         if (error) *error = "map payload too small";
         return false;
     }
 
-    memcpy(header, uncompressed->data(), sizeof(MapStreamHeaderV1));
-    memcpy(segment, uncompressed->data() + sizeof(MapStreamHeaderV1), sizeof(SegmentHeaderV1));
-    memcpy(footer, uncompressed->data() + compressed_prefix_size - sizeof(MapStreamFooterV1), sizeof(MapStreamFooterV1));
+    memcpy(header, uncompressed->data(), sizeof(MapStreamHeader));
+    memcpy(segment, uncompressed->data() + sizeof(MapStreamHeader), sizeof(SegmentHeader));
+    memcpy(footer, uncompressed->data() + compressed_prefix_size - sizeof(MapStreamFooter), sizeof(MapStreamFooter));
 
     refs->clear();
-    const size_t refs_offset = sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1);
-    const size_t refs_size = static_cast<size_t>(segment->chunk_count) * sizeof(ChunkRefV1);
-    if (refs_offset + refs_size + sizeof(MapStreamFooterV1) != compressed_prefix_size) {
+    const size_t refs_offset = sizeof(MapStreamHeader) + sizeof(SegmentHeader);
+    const size_t refs_size = static_cast<size_t>(segment->chunk_count) * sizeof(ChunkRef);
+    if (refs_offset + refs_size + sizeof(MapStreamFooter) != compressed_prefix_size) {
         if (error) *error = "map structure size mismatch";
         return false;
     }
@@ -179,7 +179,7 @@ bool LoadMapFile(const std::filesystem::path& path,
     }
 
     uint8_t computed_sha[32] = {};
-    if (!ComputeSha256(uncompressed->data(), compressed_prefix_size - sizeof(MapStreamFooterV1), computed_sha)) {
+    if (!ComputeSha256(uncompressed->data(), compressed_prefix_size - sizeof(MapStreamFooter), computed_sha)) {
         if (error) *error = "unable to compute map checksum";
         return false;
     }
@@ -191,7 +191,7 @@ bool LoadMapFile(const std::filesystem::path& path,
     return true;
 }
 
-bool ValidateChunkAtRef(const std::filesystem::path& archive_dir, const ChunkRefV1& ref, std::string* error) {
+bool ValidateChunkAtRef(const std::filesystem::path& archive_dir, const ChunkRef& ref, std::string* error) {
     std::filesystem::path bevy_path = archive_dir / "bevies" / ("bevy_" + std::to_string(ref.bevy_id) + ".bev");
     FILE* bevy_file = fopen(bevy_path.c_str(), "rb");
     if (!bevy_file) {
@@ -212,26 +212,26 @@ bool ValidateChunkAtRef(const std::filesystem::path& archive_dir, const ChunkRef
     }
 
     uint64_t file_size = static_cast<uint64_t>(file_size_long);
-    if (file_size < 16 + sizeof(BevyFooterV1)) {
+    if (file_size < 16 + sizeof(BevyFooter)) {
         fclose(bevy_file);
         if (error) *error = "bevy too small";
         return false;
     }
 
-    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooterV1)), SEEK_SET) != 0) {
+    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooter)), SEEK_SET) != 0) {
         fclose(bevy_file);
         if (error) *error = "failed to seek footer";
         return false;
     }
 
-    BevyFooterV1 footer{};
+    BevyFooter footer{};
     if (fread(&footer, 1, sizeof(footer), bevy_file) != sizeof(footer)) {
         fclose(bevy_file);
         if (error) *error = "failed to read bevy footer";
         return false;
     }
 
-    if (footer.bevy_size != file_size || footer.index_offset < 16 || footer.index_offset >= file_size - sizeof(BevyFooterV1)) {
+    if (footer.bevy_size != file_size || footer.index_offset < 16 || footer.index_offset >= file_size - sizeof(BevyFooter)) {
         fclose(bevy_file);
         if (error) *error = "invalid bevy footer bounds";
         return false;
@@ -243,7 +243,7 @@ bool ValidateChunkAtRef(const std::filesystem::path& archive_dir, const ChunkRef
         return false;
     }
 
-    ChunkRecordHeaderV1 header{};
+    ChunkRecordHeader header{};
     if (fread(&header, 1, sizeof(header), bevy_file) != sizeof(header)) {
         fclose(bevy_file);
         if (error) *error = "failed to read chunk header";
@@ -312,10 +312,10 @@ bool ValidateChunkAtRef(const std::filesystem::path& archive_dir, const ChunkRef
 }
 
 void PrintMapSummary(const std::filesystem::path& map_path) {
-    MapStreamHeaderV1 header{};
-    SegmentHeaderV1 segment{};
-    MapStreamFooterV1 footer{};
-    std::vector<ChunkRefV1> refs;
+    MapStreamHeader header{};
+    SegmentHeader segment{};
+    MapStreamFooter footer{};
+    std::vector<ChunkRef> refs;
     std::vector<uint8_t> uncompressed;
     std::string error;
 
@@ -360,19 +360,19 @@ void PrintBevySummary(const std::filesystem::path& bevy_path) {
     }
 
     uint64_t file_size = static_cast<uint64_t>(file_size_long);
-    if (file_size < 16 + sizeof(BevyFooterV1)) {
+    if (file_size < 16 + sizeof(BevyFooter)) {
         fclose(bevy_file);
         std::cout << "Bevy: " << bevy_path.filename().string() << " - too small\n";
         return;
     }
 
-    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooterV1)), SEEK_SET) != 0) {
+    if (fseek(bevy_file, static_cast<long>(file_size - sizeof(BevyFooter)), SEEK_SET) != 0) {
         fclose(bevy_file);
         std::cout << "Bevy: " << bevy_path.filename().string() << " - footer seek failed\n";
         return;
     }
 
-    BevyFooterV1 footer{};
+    BevyFooter footer{};
     if (fread(&footer, 1, sizeof(footer), bevy_file) != sizeof(footer)) {
         fclose(bevy_file);
         std::cout << "Bevy: " << bevy_path.filename().string() << " - footer read failed\n";
@@ -387,7 +387,7 @@ void PrintBevySummary(const std::filesystem::path& bevy_path) {
 
     uint8_t computed_sha[32] = {};
     if (fseek(bevy_file, 0, SEEK_SET) == 0) {
-        std::vector<uint8_t> prefix(static_cast<size_t>(file_size - sizeof(BevyFooterV1)));
+        std::vector<uint8_t> prefix(static_cast<size_t>(file_size - sizeof(BevyFooter)));
         if (fread(prefix.data(), 1, prefix.size(), bevy_file) == prefix.size() &&
             ComputeSha256(prefix.data(), prefix.size(), computed_sha)) {
             std::cout << "  SHA-256 match: "
@@ -412,10 +412,10 @@ bool VerifyArchive(const std::filesystem::path& archive_dir) {
             continue;
         }
 
-        MapStreamHeaderV1 header{};
-        SegmentHeaderV1 segment{};
-        MapStreamFooterV1 footer{};
-        std::vector<ChunkRefV1> refs;
+        MapStreamHeader header{};
+        SegmentHeader segment{};
+        MapStreamFooter footer{};
+        std::vector<ChunkRef> refs;
         std::vector<uint8_t> uncompressed;
         std::string error;
 
@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        aff4::ChunkIndexValueV1 value{};
+        aff4::ChunkIndexValue value{};
         if (corpus.Get(hash, &value) != aff4::STATUS_OK) {
             std::cout << "Chunk not found\n";
             return 1;

@@ -16,7 +16,7 @@ specific language governing permissions and limitations under the License.
 /*
   Archive-only command line entry point.
 */
-#include "aff4/aff4_archive.h"
+#include "archive/archive.h"
 #include "aff4/aff4_file.h"
 #include "aff4/libaff4.h"
 
@@ -220,25 +220,25 @@ int RunExtract(const CliOptions& options) {
 }
 
 #pragma pack(push, 1)
-struct MapStreamHeaderV1 {
+struct MapStreamHeader {
     uint8_t magic[8];
     uint64_t logical_size;
     uint32_t segment_count;
     uint32_t reserved;
 };
 
-struct SegmentHeaderV1 {
+struct SegmentHeader {
     uint64_t logical_offset;
     uint32_t chunk_count;
 };
 
-struct ChunkRefV1 {
+struct ChunkRef {
     uint32_t bevy_id;
     uint64_t offset;
     uint32_t uncompressed_size;
 };
 
-struct MapStreamFooterV1 {
+struct MapStreamFooter {
     uint64_t chunk_count;
     uint64_t logical_size;
     uint64_t data_size;
@@ -255,7 +255,7 @@ void ReportArchiveMap(const std::filesystem::path& map_path) {
 
     uint64_t uncompressed_size = 0;
     map_file.read(reinterpret_cast<char*>(&uncompressed_size), sizeof(uncompressed_size));
-    if (!map_file || uncompressed_size < sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1) + sizeof(MapStreamFooterV1)) {
+    if (!map_file || uncompressed_size < sizeof(MapStreamHeader) + sizeof(SegmentHeader) + sizeof(MapStreamFooter)) {
         std::cout << "  - Map: " << map_path.filename().string() << " (invalid map header)\n";
         return;
     }
@@ -282,10 +282,10 @@ void ReportArchiveMap(const std::filesystem::path& map_path) {
         return;
     }
 
-    const auto* header = reinterpret_cast<const MapStreamHeaderV1*>(uncompressed.data());
-    const auto* segment = reinterpret_cast<const SegmentHeaderV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1));
-    const auto* footer = reinterpret_cast<const MapStreamFooterV1*>(uncompressed.data() + uncompressed_size - sizeof(MapStreamFooterV1));
-    const auto* refs = reinterpret_cast<const ChunkRefV1*>(uncompressed.data() + sizeof(MapStreamHeaderV1) + sizeof(SegmentHeaderV1));
+    const auto* header = reinterpret_cast<const MapStreamHeader*>(uncompressed.data());
+    const auto* segment = reinterpret_cast<const SegmentHeader*>(uncompressed.data() + sizeof(MapStreamHeader));
+    const auto* footer = reinterpret_cast<const MapStreamFooter*>(uncompressed.data() + uncompressed_size - sizeof(MapStreamFooter));
+    const auto* refs = reinterpret_cast<const ChunkRef*>(uncompressed.data() + sizeof(MapStreamHeader) + sizeof(SegmentHeader));
 
     uint64_t logical_sum = 0;
     for (uint32_t i = 0; i < segment->chunk_count; ++i) {
