@@ -13,15 +13,15 @@ CONDITIONS OF ANY KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations under the License.
 */
 
-#include "aff4/lexicon.h"
-#include "aff4/aff4_image.h"
-#include "aff4/aff4_hash.h"
-#include "aff4/libaff4.h"
+#include "imgformatlib/aff4/lexicon.h"
+#include "imgformatlib/aff4/aff4_image.h"
+#include "imgformatlib/aff4/aff4_hash.h"
+#include "imgformatlib/aff4/libaff4.h"
 #include <zlib.h>
 #include <snappy.h>
 #include <lz4.h>
-#include "aff4/aff4_utils.h"
-#include "aff4/volume_group.h"
+#include "imgformatlib/aff4/aff4_utils.h"
+#include "imgformatlib/aff4/volume_group.h"
 
 namespace aff4 {
 

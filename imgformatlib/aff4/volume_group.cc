@@ -1,8 +1,8 @@
-#include "aff4/volume_group.h"
-#include "aff4/aff4_image.h"
-#include "aff4/aff4_map.h"
-#include "aff4/zip.h"
-#include "aff4/aff4_symstream.h"
+#include "imgformatlib/aff4/volume_group.h"
+#include "imgformatlib/aff4/aff4_image.h"
+#include "imgformatlib/aff4/aff4_map.h"
+#include "imgformatlib/aff4/zip.h"
+#include "imgformatlib/aff4/aff4_symstream.h"
 
 namespace aff4 {
 

@@ -5,7 +5,7 @@
  *      Author: darran
  */
 
-#include "aff4/aff4_symstream.h"
+#include "imgformatlib/aff4/aff4_symstream.h"
 #include <climits>
 
 namespace aff4 {

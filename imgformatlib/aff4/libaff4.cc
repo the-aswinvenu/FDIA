@@ -19,13 +19,13 @@ specific language governing permissions and limitations under the License.
 #include <fnmatch.h>
 #endif
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
-#include "aff4/aff4_utils.h"
-#include "aff4/aff4_errors.h"
-#include "aff4/aff4_io.h"
-#include "aff4/libaff4.h"
-#include "aff4/aff4_directory.h"
+#include "imgformatlib/aff4/aff4_utils.h"
+#include "imgformatlib/aff4/aff4_errors.h"
+#include "imgformatlib/aff4/aff4_io.h"
+#include "imgformatlib/aff4/libaff4.h"
+#include "imgformatlib/aff4/aff4_directory.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <spdlog/sinks/stdout_sinks.h>

@@ -13,9 +13,9 @@ CONDITIONS OF ANY KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations under the License.
 */
 
-#include "aff4/aff4_base.h"
-#include "aff4/lexicon.h"
-#include "aff4/rdf.h"
+#include "imgformatlib/aff4/aff4_base.h"
+#include "imgformatlib/aff4/lexicon.h"
+#include "imgformatlib/aff4/rdf.h"
 #include <limits.h>
 #include <regex>
 #include <stdlib.h>

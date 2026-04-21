@@ -680,9 +680,16 @@ AFF4Status ArchiveChunkStore::RecoverChunkJournal() {
 }
 
 AFF4Status ArchiveChunkStore::IngestStream(
-    AFF4Stream* input_stream, URN image_urn, const std::string& expected_input_sha256_hex) {
+    AFF4Stream* input_stream, URN image_urn, std::string* computed_sha256_hex) {
     if (!input_stream || !corpus_ || !bevy_writer_) return GENERIC_ERROR;
-    
+
+    // Rolling SHA-256 of every byte read — computed in the same single pass as
+    // CDC chunking, so the stored hash is guaranteed to match extraction.
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> sha_ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!sha_ctx || EVP_DigestInit_ex(sha_ctx.get(), EVP_sha256(), nullptr) != 1) {
+        return GENERIC_ERROR;
+    }
+
     ArchiveMapStream map_stream(resolver_, image_urn);
 
     std::vector<uint8_t> buffer(kCdcMaxSize);
@@ -795,11 +802,14 @@ AFF4Status ArchiveChunkStore::IngestStream(
         return STATUS_OK;
     };
     
+    const size_t io_buffer_size = 1024 * 1024; // 1 MB I/O read block
+    std::vector<char> io_buffer(io_buffer_size);
+
     while (true) {
-        char next_byte[1];
-        size_t read_bytes = 1;
-        AFF4Status r_status = input_stream->ReadBuffer(next_byte, &read_bytes);
-        if (r_status != STATUS_OK || read_bytes == 0) {
+        size_t read_bytes = io_buffer_size;
+        AFF4Status r_status = input_stream->ReadBuffer(io_buffer.data(), &read_bytes);
+        if (read_bytes == 0) {
+            // EOF reached
             if (current_chunk_size > 0) {
                 if (process_chunk(buffer.data(), current_chunk_size) != STATUS_OK) {
                     return GENERIC_ERROR;
@@ -808,23 +818,47 @@ AFF4Status ArchiveChunkStore::IngestStream(
             break;
         }
         
-        buffer[current_chunk_size++] = next_byte[0];
-        
-        // CDC rolling hash
-        hash = (hash << 1) + GEAR_MATRIX[static_cast<uint8_t>(next_byte[0])];
-        bool is_cdc_boundary = (current_chunk_size >= kCdcMinSize) && IsCdcBoundary(hash, current_chunk_size);
-        bool is_max_boundary = (current_chunk_size >= kCdcMaxSize);
-        
-        if (is_cdc_boundary || is_max_boundary) {
-            if (process_chunk(buffer.data(), current_chunk_size) != STATUS_OK) {
+        // Process the read block from memory
+        for (size_t i = 0; i < read_bytes; ++i) {
+            uint8_t byte = static_cast<uint8_t>(io_buffer[i]);
+            buffer[current_chunk_size++] = byte;
+            if (EVP_DigestUpdate(sha_ctx.get(), &byte, 1) != 1) {
                 return GENERIC_ERROR;
             }
+
+            // CDC rolling hash
+            hash = (hash << 1) + GEAR_MATRIX[byte];
+            bool is_cdc_boundary = (current_chunk_size >= kCdcMinSize) && IsCdcBoundary(hash, current_chunk_size);
+            bool is_max_boundary = (current_chunk_size >= kCdcMaxSize);
             
-            // Reset for next chunk
-            current_chunk_size = 0;
-            hash = 0;
+            if (is_cdc_boundary || is_max_boundary) {
+                if (process_chunk(buffer.data(), current_chunk_size) != STATUS_OK) {
+                    return GENERIC_ERROR;
+                }
+                
+                // Reset for next chunk
+                current_chunk_size = 0;
+                hash = 0;
+            }
+        }
+
+        if (r_status != STATUS_OK) {
+            // Short read with an error
+            return GENERIC_ERROR;
         }
     }
+
+    // Finalize SHA-256 and store it alongside the map.
+    uint8_t digest[32] = {};
+    unsigned int digest_len = 0;
+    if (EVP_DigestFinal_ex(sha_ctx.get(), digest, &digest_len) != 1 || digest_len != 32) {
+        return GENERIC_ERROR;
+    }
+
+    std::ostringstream hex_out;
+    hex_out << std::hex << std::setfill('0');
+    for (uint8_t b : digest) hex_out << std::setw(2) << static_cast<unsigned int>(b);
+    const std::string ingest_sha256 = hex_out.str();
 
     // Save map
     std::string clean_urn = CleanUrnComponent(image_urn);
@@ -833,15 +867,22 @@ AFF4Status ArchiveChunkStore::IngestStream(
         return GENERIC_ERROR;
     }
 
-    if (!expected_input_sha256_hex.empty()) {
-        const std::string metadata_key = "file_sha256:" + clean_urn;
-        if (corpus_->PutMetadata(metadata_key, expected_input_sha256_hex) != STATUS_OK) {
-            std::cerr << "Failed to persist SHA-256 metadata for " << clean_urn << "\n";
-            return GENERIC_ERROR;
-        }
+    const std::string metadata_key = "file_sha256:" + clean_urn;
+    if (corpus_->PutMetadata(metadata_key, ingest_sha256) != STATUS_OK) {
+        std::cerr << "Failed to persist SHA-256 metadata for " << clean_urn << "\n";
+        return GENERIC_ERROR;
+    }
+
+    if (computed_sha256_hex) {
+        *computed_sha256_hex = ingest_sha256;
     }
 
     return STATUS_OK;
+}
+
+AFF4Status ArchiveChunkStore::StoreRawMetadata(const std::string& key, const std::string& value) {
+    if (!corpus_) return GENERIC_ERROR;
+    return corpus_->PutMetadata(key, value);
 }
 
 // -------------------------------------------------------------
@@ -849,10 +890,58 @@ AFF4Status ArchiveChunkStore::IngestStream(
 // -------------------------------------------------------------
 ArchiveExtractor::ArchiveExtractor(const std::string& archive_dir) : archive_dir_(archive_dir) {}
 
+
 ArchiveExtractor::~ArchiveExtractor() {
     for (auto& pair : open_bevies_) {
         if (pair.second) fclose(pair.second);
     }
+}
+
+AFF4Status ArchiveExtractor::GetMapLogicalSize(const std::string& map_name, uint64_t* out_size) {
+    if (!out_size) return GENERIC_ERROR;
+    std::string map_path = archive_dir_ + "/maps/" + map_name;
+    FILE* f = fopen(map_path.c_str(), "rb");
+    if (!f) return GENERIC_ERROR;
+
+    uint64_t uncompressed_size = 0;
+    if (fread(&uncompressed_size, 1, sizeof(uint64_t), f) != sizeof(uint64_t)) {
+        fclose(f); return GENERIC_ERROR;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f); return GENERIC_ERROR;
+    }
+    long end_pos = ftell(f);
+    if (end_pos <= static_cast<long>(sizeof(uint64_t))) {
+        fclose(f); return GENERIC_ERROR;
+    }
+    size_t compressed_size = static_cast<size_t>(end_pos - static_cast<long>(sizeof(uint64_t)));
+    if (fseek(f, sizeof(uint64_t), SEEK_SET) != 0) {
+        fclose(f); return GENERIC_ERROR;
+    }
+
+    std::vector<uint8_t> compressed(compressed_size);
+    if (fread(compressed.data(), 1, compressed_size, f) != compressed_size) {
+        fclose(f); return GENERIC_ERROR;
+    }
+    fclose(f);
+
+    if (uncompressed_size < sizeof(MapStreamHeader)) return GENERIC_ERROR;
+    std::vector<uint8_t> header_buf(uncompressed_size);
+    int res = LZ4_decompress_safe((const char*)compressed.data(), (char*)header_buf.data(),
+                                   static_cast<int>(compressed_size), static_cast<int>(uncompressed_size));
+    if (res < 0 || static_cast<uint64_t>(res) != uncompressed_size) return GENERIC_ERROR;
+
+    MapStreamHeader* header = reinterpret_cast<MapStreamHeader*>(header_buf.data());
+    if (memcmp(header->magic, "AFF4MAP1", 8) != 0) return GENERIC_ERROR;
+
+    *out_size = header->logical_size;
+    return STATUS_OK;
+}
+
+AFF4Status ArchiveExtractor::RetrieveRawMetadata(const std::string& key, std::string* out_value) {
+    ChunkCorpus corpus(archive_dir_ + "/chunk_corpus");
+    if (corpus.Initialize() != STATUS_OK) return GENERIC_ERROR;
+    return corpus.GetMetadata(key, out_value);
 }
 
 AFF4Status ArchiveExtractor::ValidateBevy(FILE* bevy_file, uint32_t bevy_id) {
@@ -936,7 +1025,7 @@ FILE* ArchiveExtractor::GetBevyFile(uint32_t bevy_id) {
     return f;
 }
 
-AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::string& output_path) {
+AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, aff4::AFF4Stream* out_stream) {
     std::string map_path = archive_dir_ + "/maps/" + map_name;
     FILE* f = fopen(map_path.c_str(), "rb");
     if (!f) { std::cerr<<"Fail 1: Cannot open " << map_path << "\n"; return GENERIC_ERROR; }
@@ -946,9 +1035,17 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
         fclose(f); std::cerr<<"Fail 2: Cannot read uncompressed size\n"; return GENERIC_ERROR;
     }
 
-    fseek(f, 0, SEEK_END);
-    size_t compressed_size = ftell(f) - sizeof(uint64_t);
-    fseek(f, sizeof(uint64_t), SEEK_SET);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f); std::cerr<<"Fail 3: Cannot seek map file end\n"; return GENERIC_ERROR;
+    }
+    long end_pos = ftell(f);
+    if (end_pos <= static_cast<long>(sizeof(uint64_t))) {
+        fclose(f); std::cerr<<"Fail 3: Invalid map file size\n"; return GENERIC_ERROR;
+    }
+    size_t compressed_size = static_cast<size_t>(end_pos - static_cast<long>(sizeof(uint64_t)));
+    if (fseek(f, sizeof(uint64_t), SEEK_SET) != 0) {
+        fclose(f); std::cerr<<"Fail 3: Cannot seek map payload\n"; return GENERIC_ERROR;
+    }
 
     std::vector<uint8_t> compressed(compressed_size);
     if (fread(compressed.data(), 1, compressed_size, f) != compressed_size) {
@@ -957,8 +1054,16 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
     fclose(f);
 
     std::vector<uint8_t> uncompressed(uncompressed_size);
-    int res = LZ4_decompress_safe((const char*)compressed.data(), (char*)uncompressed.data(), compressed_size, uncompressed_size);
-    if (res < 0 || uncompressed_size < sizeof(MapStreamHeader) + sizeof(SegmentHeader) + sizeof(MapStreamFooter)) { std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n"; return GENERIC_ERROR; }
+    int res = LZ4_decompress_safe(
+        (const char*)compressed.data(),
+        (char*)uncompressed.data(),
+        static_cast<int>(compressed_size),
+        static_cast<int>(uncompressed_size));
+    if (res < 0 || static_cast<uint64_t>(res) != uncompressed_size ||
+        uncompressed_size < sizeof(MapStreamHeader) + sizeof(SegmentHeader) + sizeof(MapStreamFooter)) {
+        std::cerr<<"Fail 4: res="<<res<<" uncomp="<<uncompressed_size<<"\n";
+        return GENERIC_ERROR;
+    }
 
     MapStreamHeader* map_header = reinterpret_cast<MapStreamHeader*>(uncompressed.data());
     if (memcmp(map_header->magic, "AFF4MAP1", sizeof(map_header->magic)) != 0) { std::cerr<<"Fail 5: Magic mismatch\n"; return GENERIC_ERROR; }
@@ -971,40 +1076,58 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
     if (memcmp(computed_sha.data(), footer->sha256, 32) != 0) { std::cerr<<"Fail 5c: Map checksum mismatch\n"; return GENERIC_ERROR; }
 
     SegmentHeader* seg = reinterpret_cast<SegmentHeader*>(uncompressed.data() + sizeof(MapStreamHeader));
-    ChunkRef* refs = reinterpret_cast<ChunkRef*>(uncompressed.data() + sizeof(MapStreamHeader) + sizeof(SegmentHeader));
 
-    if (seg->chunk_count != footer->chunk_count || map_header->segment_count != 1 || seg->logical_offset != 0 || map_header->logical_size != footer->logical_size) {
+    if (map_header->segment_count != 1 || seg->logical_offset != 0 || map_header->logical_size != footer->logical_size ||
+        seg->chunk_count != footer->chunk_count) {
         std::cerr << "Fail 5c: Map segment metadata mismatch\n";
         return GENERIC_ERROR;
     }
 
-    FILE* out_f = fopen(output_path.c_str(), "wb");
-    if (!out_f) { std::cerr<<"Fail 6: Cannot open output\n"; return GENERIC_ERROR; }
+    if (seg->chunk_count > (SIZE_MAX - sizeof(MapStreamHeader) - sizeof(SegmentHeader) - sizeof(MapStreamFooter)) / sizeof(ChunkRef)) {
+        std::cerr << "Fail 5d: Chunk count overflow\n";
+        return GENERIC_ERROR;
+    }
+    size_t refs_bytes = static_cast<size_t>(seg->chunk_count) * sizeof(ChunkRef);
+    size_t expected_size = sizeof(MapStreamHeader) + sizeof(SegmentHeader) + refs_bytes + sizeof(MapStreamFooter);
+    if (expected_size != static_cast<size_t>(uncompressed_size)) {
+        std::cerr << "Fail 5e: Map size mismatch\n";
+        return GENERIC_ERROR;
+    }
+
+    ChunkRef* refs = reinterpret_cast<ChunkRef*>(uncompressed.data() + sizeof(MapStreamHeader) + sizeof(SegmentHeader));
+
+    if (!out_stream) { std::cerr<<"Fail 6: Cannot open output\n"; return GENERIC_ERROR; }
+
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+    if (!ctx || EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
+        std::cerr << "Fail 6b: Cannot initialize SHA-256 context\n";
+        return GENERIC_ERROR;
+    }
 
     for (uint32_t i = 0; i < seg->chunk_count; i++) {
         const ChunkRef& ref = refs[i];
         FILE* bevy_f = GetBevyFile(ref.bevy_id);
         if (!bevy_f) {
-            fclose(out_f); std::cerr<<"Fail 7: Cannot open bevy_id="<<ref.bevy_id<<"\n"; return GENERIC_ERROR;
+            std::cerr<<"Fail 7: Cannot open bevy_id="<<ref.bevy_id<<"\n"; return GENERIC_ERROR;
         }
 
         fseek(bevy_f, ref.offset, SEEK_SET);
         ChunkRecordHeader header;
         if (fread(&header, 1, sizeof(header), bevy_f) != sizeof(header)) {
-            fclose(out_f); std::cerr<<"Fail 8 at offset "<<ref.offset<<"\n"; return GENERIC_ERROR;
+            std::cerr<<"Fail 8 at offset "<<ref.offset<<"\n"; return GENERIC_ERROR;
         }
 
         std::vector<uint8_t> chunk_data(header.compressed_size);
         if (fread(chunk_data.data(), 1, header.compressed_size, bevy_f) != header.compressed_size) {
-            fclose(out_f); std::cerr<<"Fail 9: Cannot read chunk data\n"; return GENERIC_ERROR;
+            std::cerr<<"Fail 9: Cannot read chunk data\n"; return GENERIC_ERROR;
         }
 
         std::vector<uint8_t> raw_data;
         if (header.compression_type == 1) { // LZ4
             raw_data.resize(header.uncompressed_size);
             int dec_res = LZ4_decompress_safe((const char*)chunk_data.data(), (char*)raw_data.data(), header.compressed_size, header.uncompressed_size);
-            if (dec_res < 0) {
-                fclose(out_f); std::cerr<<"Fail 10: LZ4 payload format broken\n"; return GENERIC_ERROR;
+            if (dec_res < 0 || dec_res != static_cast<int>(header.uncompressed_size)) {
+                std::cerr<<"Fail 10: LZ4 payload format broken\n"; return GENERIC_ERROR;
             }
         } else { // Raw
             raw_data = chunk_data;
@@ -1019,13 +1142,19 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
         
         if (memcmp(test_hash, header.blake3_hash, BLAKE3_OUT_LEN) != 0) {
             std::cerr << "Fail 11: CRITICAL DATA CORRUPTION. Extracted chunk BLAKE3 hash does not match physical Bevy header!\n";
-            fclose(out_f); return GENERIC_ERROR;
+            return GENERIC_ERROR;
         }
         
-        fwrite(raw_data.data(), 1, raw_data.size(), out_f);
+        if (out_stream->Write((char*)raw_data.data(), raw_data.size()) != STATUS_OK) {
+            std::cerr<<"Fail 11b: Write error to stream\n"; 
+            return GENERIC_ERROR;
+        }
+        
+        if (EVP_DigestUpdate(ctx.get(), raw_data.data(), raw_data.size()) != 1) {
+            std::cerr<<"Fail 11c: SHA update failure\n";
+            return GENERIC_ERROR;
+        }
     }
-
-    fclose(out_f);
 
     ChunkCorpus corpus(archive_dir_ + "/chunk_corpus");
     if (corpus.Initialize() != STATUS_OK) {
@@ -1042,8 +1171,9 @@ AFF4Status ArchiveExtractor::ExtractMap(const std::string& map_name, const std::
     }
 
     uint8_t extracted_hash[32] = {};
-    if (!ComputeSha256ForFilePath(output_path, extracted_hash)) {
-        std::cerr << "Fail 14: Cannot compute SHA-256 for extracted output\n";
+    unsigned int digest_len = 0;
+    if (EVP_DigestFinal_ex(ctx.get(), extracted_hash, &digest_len) != 1 || digest_len != 32) {
+        std::cerr << "Fail 14: SHA-256 finalize failed\n";
         return GENERIC_ERROR;
     }
 

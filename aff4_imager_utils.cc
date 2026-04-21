@@ -3,10 +3,10 @@
   command line imager.
 */
 
-#include "aff4/libaff4.h"
-#include "aff4/aff4_imager_utils.h"
-#include "aff4/rdf.h"
-#include "aff4/aff4_hash.h"
+#include "imgformatlib/aff4/libaff4.h"
+#include "imgformatlib/aff4/aff4_imager_utils.h"
+#include "imgformatlib/aff4/rdf.h"
+#include "imgformatlib/aff4/aff4_hash.h"
 #include <iostream>
 #include <string>
 #include <sstream>

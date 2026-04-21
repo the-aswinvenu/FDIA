@@ -12,11 +12,11 @@ under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 CONDITIONS OF ANY KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations under the License.
 */
-#include "aff4/lexicon.h"
-#include "aff4/aff4_map.h"
-#include "aff4/aff4_image.h"
-#include "aff4/libaff4.h"
-#include "aff4/volume_group.h"
+#include "imgformatlib/aff4/lexicon.h"
+#include "imgformatlib/aff4/aff4_map.h"
+#include "imgformatlib/aff4/aff4_image.h"
+#include "imgformatlib/aff4/libaff4.h"
+#include "imgformatlib/aff4/volume_group.h"
 
 #include <memory>
 

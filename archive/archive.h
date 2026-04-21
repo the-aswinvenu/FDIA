@@ -1,9 +1,9 @@
 #ifndef SRC_AFF4_ARCHIVE_H_
 #define SRC_AFF4_ARCHIVE_H_
 
-// #include "aff4/config.h"
-#include "aff4/aff4_io.h"
-#include "aff4/data_store.h"
+// #include "imgformatlib/aff4/config.h"
+#include "imgformatlib/aff4/aff4_io.h"
+#include "imgformatlib/aff4/data_store.h"
 #include <rocksdb/db.h>
 #include <vector>
 #include <string>
@@ -158,8 +158,13 @@ public:
     ~ArchiveChunkStore();
 
     AFF4Status Initialize();
+    // Ingests the stream and computes its SHA-256 as a single pass.
+    // On success, computed_sha256_hex (if not null) is filled with the hash
+    // of the exact bytes that were stored — guaranteed to match extraction.
     AFF4Status IngestStream(AFF4Stream* input_stream, URN image_urn,
-                            const std::string& expected_input_sha256_hex);
+                            std::string* computed_sha256_hex = nullptr);
+
+    AFF4Status StoreRawMetadata(const std::string& key, const std::string& value);
 
 private:
     DataStore* resolver_;
@@ -175,7 +180,9 @@ public:
     ArchiveExtractor(const std::string& archive_dir);
     ~ArchiveExtractor();
 
-    AFF4Status ExtractMap(const std::string& map_name, const std::string& output_path);
+    AFF4Status ExtractMap(const std::string& map_name, aff4::AFF4Stream* out_stream);
+    AFF4Status GetMapLogicalSize(const std::string& map_name, uint64_t* out_size);
+    AFF4Status RetrieveRawMetadata(const std::string& key, std::string* out_value);
 
 private:
     std::string archive_dir_;

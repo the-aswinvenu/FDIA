@@ -18,7 +18,7 @@ specific language governing permissions and limitations under the License.
 
 #include <string>
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 /**
  * @file

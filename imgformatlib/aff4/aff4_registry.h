@@ -4,7 +4,7 @@
 #ifndef SRC_AFF4_REGISTRY_H_
 #define SRC_AFF4_REGISTRY_H_
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include <unordered_map>
 #include <memory>

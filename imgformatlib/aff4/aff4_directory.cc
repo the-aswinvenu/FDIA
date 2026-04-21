@@ -13,11 +13,11 @@ CONDITIONS OF ANY KIND, either express or implied.  See the License for the
 specific language governing permissions and limitations under the License.
 */
 
-#include "aff4/config.h"
-#include "aff4/libaff4.h"
+#include "imgformatlib/aff4/config.h"
+#include "imgformatlib/aff4/libaff4.h"
 
-#include "aff4/aff4_directory.h"
-#include "aff4/aff4_file.h"
+#include "imgformatlib/aff4/aff4_directory.h"
+#include "imgformatlib/aff4/aff4_file.h"
 
 #include <sys/types.h>
 #include <dirent.h>

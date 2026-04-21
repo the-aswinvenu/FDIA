@@ -54,11 +54,12 @@ set(BLAKE3_LIB blake3)
 find_library(FMT_LIB fmt)
 find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(BZip2 REQUIRED)
 
 # ---- Generate config.h ----
 # Create aff4 subdirectory in build for generated header
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/aff4")
-set(CONFIG_H "${CMAKE_BINARY_DIR}/aff4/config.h")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/imgformatlib/aff4")
+set(CONFIG_H "${CMAKE_BINARY_DIR}/imgformatlib/aff4/config.h")
 file(WRITE ${CONFIG_H} 
 "#pragma once
 
@@ -91,27 +92,45 @@ file(WRITE ${CONFIG_H}
 "
 )
 
-# ---- Core AFF4 Library Sources ----
-set(AFF4_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/compatibility.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/data_store.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/lexicon.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/rdf.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/zip.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_directory.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_file.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_map.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_symstream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_image.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_init.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/volume_group.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/libaff4.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/tclap_parsers.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/aff4/aff4_hash.cc
+include(ExternalProject)
+
+# ---- libewf Integration (Option A) ----
+# We download the official release tarball (which comes with a pre-generated ./configure script)
+# so we don't need autotools installed on the host machine.
+ExternalProject_Add(libewf_project
+  URL https://github.com/libyal/libewf/releases/download/20240506/libewf-experimental-20240506.tar.gz
+  PREFIX ${CMAKE_BINARY_DIR}/libewf_ext
+  CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --enable-shared=no --disable-ewftools --disable-python
+  BUILD_COMMAND make
+  INSTALL_COMMAND make install
+)
+
+set(LIBEWF_INCLUDE_DIR ${CMAKE_BINARY_DIR}/libewf_ext/include)
+set(LIBEWF_STATIC_LIB ${CMAKE_BINARY_DIR}/libewf_ext/lib/libewf.a)
+
+# ---- Format Abstraction Layer (imgformatlib) ----
+set(IMGFORMATLIB_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/ewf_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/compatibility.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/data_store.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/lexicon.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/rdf.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/zip.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_directory.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_file.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_map.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_symstream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_image.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_init.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/volume_group.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/libaff4.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/tclap_parsers.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/aff4_hash.cc
 )
 
 # ---- Create Library Targets ----
-add_library(aff4 STATIC ${AFF4_SOURCES})
+add_library(imgformatlib STATIC ${IMGFORMATLIB_SOURCES})
+add_dependencies(imgformatlib libewf_project)
 
 set(ARCHIVE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/archive/archive.cc
@@ -119,11 +138,12 @@ set(ARCHIVE_SOURCES
 add_library(archive STATIC ${ARCHIVE_SOURCES})
 
 # ---- Include Directories ----
-target_include_directories(aff4 
+target_include_directories(imgformatlib 
     PUBLIC 
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<INSTALL_INTERFACE:include>
+        ${LIBEWF_INCLUDE_DIR}
     PRIVATE
         ${RAPTOR2_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS}
@@ -146,8 +166,9 @@ target_include_directories(archive
 )
 
 # ---- Link Libraries ----
-target_link_libraries(aff4 
+target_link_libraries(imgformatlib 
     PUBLIC
+        ${LIBEWF_STATIC_LIB}
         ${RAPTOR2_LIBRARIES}
         ${ZLIB_LIBRARIES}
         ${TCLAP_LIBRARIES}
@@ -158,11 +179,12 @@ target_link_libraries(aff4
         Threads::Threads
         OpenSSL::SSL
         OpenSSL::Crypto
+        BZip2::BZip2
 )
 
 target_link_libraries(archive
     PUBLIC
-        aff4
+        imgformatlib
         ${SNAPPY_LIB}
         ${LZ4_LIB}
         ${ROCKSDB_LIB}
@@ -170,7 +192,7 @@ target_link_libraries(archive
 )
 
 # ---- Compiler Flags ----
-target_compile_options(aff4 PRIVATE
+target_compile_options(imgformatlib PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-parameter -Wno-sign-compare>
@@ -178,7 +200,7 @@ target_compile_options(aff4 PRIVATE
 
 # ---- Compile Definitions ----
 if(AFF4_DISABLE_LOGGING)
-    target_compile_definitions(aff4 PRIVATE AFF4_NO_LOGGING)
+    target_compile_definitions(imgformatlib PRIVATE AFF4_NO_LOGGING)
 endif()
 
 # ---- Build Executables ----
@@ -202,7 +224,7 @@ endif()
 
 # ---- Installation ----
 # Install library
-install(TARGETS aff4 archive
+install(TARGETS imgformatlib archive
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin

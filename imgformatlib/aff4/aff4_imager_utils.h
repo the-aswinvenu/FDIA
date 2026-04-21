@@ -20,7 +20,7 @@ specific language governing permissions and limitations under the License.
 #ifndef SRC_AFF4_IMAGER_UTILS_H
 #define SRC_AFF4_IMAGER_UTILS_H
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include "aff4_errors.h"
 #include "data_store.h"

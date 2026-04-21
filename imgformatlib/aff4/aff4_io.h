@@ -16,7 +16,7 @@ specific language governing permissions and limitations under the License.
 #ifndef     SRC_AFF4_IO_H_
 #define     SRC_AFF4_IO_H_
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include <unordered_map>
 #include <unordered_set>

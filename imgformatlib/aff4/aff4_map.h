@@ -16,7 +16,7 @@ specific language governing permissions and limitations under the License.
 #ifndef SRC_AFF4_MAP_H_
 #define SRC_AFF4_MAP_H_
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include "aff4_io.h"
 #include "volume_group.h"

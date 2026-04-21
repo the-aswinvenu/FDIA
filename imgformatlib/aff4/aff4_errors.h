@@ -16,7 +16,7 @@ specific language governing permissions and limitations under the License.
 #ifndef AFF4_ERRORS_H
 #define AFF4_ERRORS_H
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 namespace aff4 {
 

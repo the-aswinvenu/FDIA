@@ -21,14 +21,14 @@
  end of another file, global_offset will be > 0 and "real" offsets need to be
  converted from "zip offsets" by adding this global value.
  */
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include <sstream>
 #include <iomanip>
-#include "aff4/zip.h"
-#include "aff4/rdf.h"
-#include "aff4/lexicon.h"
-#include "aff4/libaff4.h"
+#include "imgformatlib/aff4/zip.h"
+#include "imgformatlib/aff4/rdf.h"
+#include "imgformatlib/aff4/lexicon.h"
+#include "imgformatlib/aff4/libaff4.h"
 
 
 namespace aff4 {

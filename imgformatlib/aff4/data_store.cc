@@ -15,14 +15,14 @@
 
 // Implementation of data stores.
 #include <typeinfo>
-#include "aff4/lexicon.h"
-#include "aff4/data_store.h"
-#include "aff4/libaff4.h"
+#include "imgformatlib/aff4/lexicon.h"
+#include "imgformatlib/aff4/data_store.h"
+#include "imgformatlib/aff4/libaff4.h"
 #include <raptor2/raptor2.h>
 #include <spdlog/spdlog.h>
 #include <iostream>
 #include <mutex>
-#include "aff4/aff4_symstream.h"
+#include "imgformatlib/aff4/aff4_symstream.h"
 
 namespace aff4 {
 

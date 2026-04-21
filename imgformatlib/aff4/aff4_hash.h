@@ -25,7 +25,7 @@ specific language governing permissions and limitations under the License.
 #ifndef SRC_AFF4_HASH_H_
 #define SRC_AFF4_HASH_H_
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 #include "aff4_errors.h"
 #include "rdf.h"
 

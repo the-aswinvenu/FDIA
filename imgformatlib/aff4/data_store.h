@@ -16,7 +16,7 @@ specific language governing permissions and limitations under the License.
 #ifndef  SRC_DATA_STORE_H_
 #define  SRC_DATA_STORE_H_
 
-#include "aff4/config.h"
+#include "imgformatlib/aff4/config.h"
 
 #include "aff4_base.h"
 #include "threadpool.h"
