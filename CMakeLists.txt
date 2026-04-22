@@ -111,6 +111,7 @@ set(LIBEWF_STATIC_LIB ${CMAKE_BINARY_DIR}/libewf_ext/lib/libewf.a)
 # ---- Format Abstraction Layer (imgformatlib) ----
 set(IMGFORMATLIB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/ewf_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4_stream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/compatibility.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/data_store.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/lexicon.cc

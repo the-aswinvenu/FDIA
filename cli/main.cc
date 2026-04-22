@@ -51,6 +51,7 @@ struct CliOptions {
 };
 
 constexpr const char* kLayoutEwf = "ewf";
+constexpr const char* kLayoutAff4 = "aff4";
 constexpr const char* kLayoutRawSingle = "raw-single";
 constexpr const char* kLayoutRawMultipart = "raw-multipart";
 
@@ -336,6 +337,13 @@ bool HasEwfSegmentExtension(const std::string& path) {
     if (kind != 'e') return false;
     return std::isdigit(static_cast<unsigned char>(ext[2])) &&
            std::isdigit(static_cast<unsigned char>(ext[3]));
+}
+
+bool HasAff4Extension(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".aff4";
 }
 
 std::string NormalizeEwfOutputBasePath(const std::string& output_path) {
@@ -633,6 +641,7 @@ int RunIngest(const CliOptions& options) {
         std::string lower_path = input_path;
         std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
         bool is_ewf = (lower_path.length() >= 4 && lower_path.substr(lower_path.length() - 4) == ".e01");
+        bool is_aff4 = HasAff4Extension(input_path);
         int raw_part_number = 0;
         int raw_part_width = 0;
         bool is_raw_numeric_part = ParseNumericPartExtension(input_path, &raw_part_number, &raw_part_width);
@@ -684,6 +693,16 @@ int RunIngest(const CliOptions& options) {
             active_stream = &ewf_stream;
             source_layout = kLayoutEwf;
             source_parts = paths;
+            source_part_sizes.clear();
+        } else if (is_aff4) {
+            std::cout << "Detected AFF4 file, ingesting container bytes as raw stream...\n";
+            if (aff4::NewFileBackedObject(&resolver, input_path, "read", file_stream) != aff4::STATUS_OK) {
+                std::cerr << "Failed to open AFF4 input: " << input_path << "\n";
+                return 1;
+            }
+            active_stream = file_stream.get();
+            source_layout = kLayoutAff4;
+            source_parts = {input_path};
             source_part_sizes.clear();
         } else if (is_raw_numeric_part && raw_part_number == 1) {
             std::vector<std::string> segments = GlobRawNumericSegments(input_path);
@@ -774,8 +793,12 @@ int RunIngest(const CliOptions& options) {
         }
 
         // Store companion .txt metadata file (case details, examiner, etc.) if present.
-        std::string txt_path = is_ewf ? imgformatlib::EwfStream::FindInfoTxt(input_path)
-                                      : FindCompanionTxt(input_path);
+        std::string txt_path;
+        if (is_ewf) {
+            txt_path = imgformatlib::EwfStream::FindInfoTxt(input_path);
+        } else if (!is_aff4) {
+            txt_path = FindCompanionTxt(input_path);
+        }
         if (!txt_path.empty()) {
             std::ifstream txt_file(txt_path);
             std::string txt_contents((std::istreambuf_iterator<char>(txt_file)),
@@ -814,6 +837,7 @@ int RunExtract(const CliOptions& options) {
     std::string source_layout;
     bool have_layout = (extractor.RetrieveRawMetadata("source_layout:" + options.map_name, &source_layout) == aff4::STATUS_OK);
     bool is_ewf = have_layout && source_layout == kLayoutEwf;
+    bool is_aff4 = have_layout && source_layout == kLayoutAff4;
     bool is_raw_multipart = have_layout && source_layout == kLayoutRawMultipart;
 
     if (!have_layout) {
@@ -828,6 +852,7 @@ int RunExtract(const CliOptions& options) {
         std::string lower_path = output_path;
         std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
         is_ewf = (lower_path.length() >= 4 && lower_path.substr(lower_path.length() - 4) == ".e01");
+        is_aff4 = HasAff4Extension(output_path);
     }
 
     aff4::AFF4Stream* active_stream = nullptr;
@@ -855,6 +880,12 @@ int RunExtract(const CliOptions& options) {
             return 1;
         }
         active_stream = &ewf_stream;
+    } else if (is_aff4) {
+        if (aff4::NewFileBackedObject(&resolver, output_path, "truncate", file_stream) != aff4::STATUS_OK) {
+            std::cerr << "Failed to open AFF4 output file: " << output_path << "\n";
+            return 1;
+        }
+        active_stream = file_stream.get();
     } else if (is_raw_multipart) {
         std::string parts_blob;
         std::string sizes_blob;
