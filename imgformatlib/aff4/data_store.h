@@ -19,7 +19,6 @@ specific language governing permissions and limitations under the License.
 #include "imgformatlib/aff4/config.h"
 
 #include "aff4_base.h"
-#include "threadpool.h"
 #include "spdlog/spdlog.h"
 
 #include <unordered_map>
@@ -28,7 +27,6 @@ specific language governing permissions and limitations under the License.
 #include <string>
 #include <memory>
 #include <fstream>
-#include "aff4_utils.h"
 #include <string.h>
 
 #include "rdf.h"
@@ -80,10 +78,9 @@ AFF4Flusher<AFF4ObjectType> make_flusher(Args && ...args) {
 
 struct DataStoreOptions {
     std::shared_ptr<spdlog::logger> logger = aff4::get_logger();
-    int threadpool_size = 1;
 
-    DataStoreOptions(std::shared_ptr<spdlog::logger> logger,  int threadpool_size):
-        logger(logger), threadpool_size(threadpool_size){};
+    DataStoreOptions(std::shared_ptr<spdlog::logger> logger):
+        logger(logger){};
 
     DataStoreOptions() : logger(aff4::get_logger()){};
 };
@@ -116,9 +113,6 @@ class DataStore {
 
     /// You can add new namespaces here for turtle serialization.
     std::vector<std::pair<std::string, std::string>> namespaces;
-
-    // A global thread pool for general use.
-    std::unique_ptr<ThreadPool> pool;
 
     virtual void Set(const URN& urn, const URN& attribute,
                      RDFValue* value, bool replace = true) = 0;

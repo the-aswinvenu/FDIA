@@ -1,0 +1,12 @@
+/media/unknown/WDBlue1/FDIA/CMakeFiles/blake3.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/imgformatlib.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/archive.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/aff4imager.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/archive_debug.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/edit_cache.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/rebuild_cache.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/list_install_components.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/install.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/install/local.dir
+/media/unknown/WDBlue1/FDIA/CMakeFiles/install/strip.dir

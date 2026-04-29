@@ -32,6 +32,41 @@ pkg_check_modules(SPDLOG REQUIRED spdlog)
 pkg_check_modules(URIPARSER REQUIRED liburiparser)
 pkg_check_modules(UUID REQUIRED uuid)
 
+# ---- Auto-Install libafflib Binary ----
+set(LIBAFFLIB_EXT_DIR "${CMAKE_BINARY_DIR}/libafflib_ext")
+set(AFFLIB_LIB_PATH "${LIBAFFLIB_EXT_DIR}/usr/lib/x86_64-linux-gnu/libafflib.so")
+
+if(NOT EXISTS "${AFFLIB_LIB_PATH}")
+    message(STATUS "Downloading and extracting libafflib packages via apt-get...")
+    file(MAKE_DIRECTORY "${LIBAFFLIB_EXT_DIR}")
+    execute_process(
+        COMMAND bash -c "apt-get download libafflib-dev libafflib0t64 || apt-get download libafflib-dev libafflib0"
+        WORKING_DIRECTORY "${LIBAFFLIB_EXT_DIR}"
+        RESULT_VARIABLE apt_result
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(apt_result EQUAL 0)
+        execute_process(
+            COMMAND bash -c "for deb in *.deb; do dpkg -x \"$deb\" .; done"
+            WORKING_DIRECTORY "${LIBAFFLIB_EXT_DIR}"
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+    else()
+        message(WARNING "Failed to download libafflib via apt-get. Legacy AFF support will be disabled.")
+    endif()
+endif()
+
+if(EXISTS "${AFFLIB_LIB_PATH}")
+    message(STATUS "Found auto-downloaded libafflib: ${AFFLIB_LIB_PATH}")
+    set(AFFLIB_LIB "${AFFLIB_LIB_PATH}")
+    set(AFFLIB_INCLUDE_DIR "${LIBAFFLIB_EXT_DIR}/usr/include")
+    add_compile_definitions(HAVE_LIBAFFLIB)
+else()
+    set(AFFLIB_LIB "")
+endif()
+
 find_library(SNAPPY_LIB snappy REQUIRED)
 find_library(LZ4_LIB lz4 REQUIRED)
 find_library(ROCKSDB_LIB rocksdb REQUIRED)
@@ -112,6 +147,8 @@ set(LIBEWF_STATIC_LIB ${CMAKE_BINARY_DIR}/libewf_ext/lib/libewf.a)
 set(IMGFORMATLIB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/ewf_stream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4_container_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff_stream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/compatibility.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/data_store.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/imgformatlib/aff4/lexicon.cc
@@ -145,6 +182,7 @@ target_include_directories(imgformatlib
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
         $<INSTALL_INTERFACE:include>
         ${LIBEWF_INCLUDE_DIR}
+        ${AFFLIB_INCLUDE_DIR}
     PRIVATE
         ${RAPTOR2_INCLUDE_DIRS}
         ${ZLIB_INCLUDE_DIRS}
@@ -182,6 +220,9 @@ target_link_libraries(imgformatlib
         OpenSSL::Crypto
         BZip2::BZip2
 )
+if(AFFLIB_LIB)
+    target_link_libraries(imgformatlib PUBLIC ${AFFLIB_LIB})
+endif()
 
 target_link_libraries(archive
     PUBLIC

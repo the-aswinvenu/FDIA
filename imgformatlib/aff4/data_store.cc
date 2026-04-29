@@ -64,8 +64,7 @@ bool DataStore::ShouldSuppress(const URN& subject,
 
 
 DataStore::DataStore(DataStoreOptions options)
-    : logger(options.logger),
-      pool(std::unique_ptr<ThreadPool>(new ThreadPool(options.threadpool_size))) {
+    : logger(options.logger) {
 
     // Add these default namespace.
     namespaces.push_back(std::pair<std::string, std::string>("aff4", AFF4_NAMESPACE));

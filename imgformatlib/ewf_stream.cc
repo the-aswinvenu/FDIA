@@ -76,17 +76,32 @@ aff4::AFF4Status EwfStream::OpenRead(const std::vector<std::string>& paths) {
     return aff4::STATUS_OK;
 }
 
-aff4::AFF4Status EwfStream::OpenWrite(const std::string& path, uint64_t logical_size) {
+aff4::AFF4Status EwfStream::OpenWrite(const std::string& path, uint64_t logical_size, uint64_t split_size) {
     libewf_error_t* error = nullptr;
+
     if (libewf_handle_initialize(&ewf_handle_, &error) != 1) {
-        if (error) libewf_error_free(&error);
+        if (error) {
+            libewf_error_free(&error);
+        }
         return aff4::GENERIC_ERROR;
+    }
+
+    if (split_size > 0) {
+        if (libewf_handle_set_maximum_segment_size(ewf_handle_, split_size, &error) != 1) {
+            std::cerr << "Warning: Could not set EWF segment split size to " << split_size << std::endl;
+            if (error) libewf_error_free(&error);
+        }
     }
 
     char* filenames[1];
     filenames[0] = const_cast<char*>(path.c_str());
     if (libewf_handle_open(ewf_handle_, filenames, 1, LIBEWF_OPEN_WRITE, &error) != 1) {
-        if (error) libewf_error_free(&error);
+        if (error) {
+            libewf_error_fprint(error, stderr);
+            libewf_error_free(&error);
+        }
+        libewf_handle_free(&ewf_handle_, nullptr);
+        ewf_handle_ = nullptr;
         return aff4::GENERIC_ERROR;
     }
 
@@ -121,10 +136,21 @@ aff4::AFF4Status EwfStream::OpenWrite(const std::string& path, uint64_t logical_
 
 std::string EwfStream::FindInfoTxt(const std::string& base_file) {
     std::filesystem::path p(base_file);
-    std::filesystem::path txt = p.parent_path() / (p.stem().string() + ".txt");
-    if (std::filesystem::exists(txt)) {
-        return txt.string();
-    }
+    
+    // Check <filename>.txt and <filename>.info first (e.g. Test3E01.E01.txt)
+    std::filesystem::path full_txt = p.parent_path() / (p.filename().string() + ".txt");
+    if (std::filesystem::exists(full_txt)) return full_txt.string();
+    
+    std::filesystem::path full_info = p.parent_path() / (p.filename().string() + ".info");
+    if (std::filesystem::exists(full_info)) return full_info.string();
+
+    // Check <stem>.txt and <stem>.info (e.g. Test3E01.txt)
+    std::filesystem::path stem_txt = p.parent_path() / (p.stem().string() + ".txt");
+    if (std::filesystem::exists(stem_txt)) return stem_txt.string();
+    
+    std::filesystem::path stem_info = p.parent_path() / (p.stem().string() + ".info");
+    if (std::filesystem::exists(stem_info)) return stem_info.string();
+
     return "";
 }
 

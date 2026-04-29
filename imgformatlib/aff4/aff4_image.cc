@@ -198,13 +198,10 @@ public:
     // contiguously. Instead, the index is sorted by chunk id and
     // refer to chunks in the bevy in any order.
     void EnqueueCompressChunk(int chunk_id, const std::string& data) {
-        std::future<AFF4Status> new_task = resolver->pool->enqueue(
-            [this, chunk_id, data]() {
-                return _CompressChunk(chunk_id, data);
-            });
+        AFF4Status status = _CompressChunk(chunk_id, data);
 
         std::unique_lock<std::mutex> lock(mutex);
-        results.push_back(std::move(new_task));
+        results.push_back(status);
     }
 
     int chunks_written() {
@@ -215,8 +212,8 @@ public:
     AFF4Status Finalize() {
         std::unique_lock<std::mutex> lock(mutex);
 
-        for (auto& result: results) {
-            RETURN_IF_ERROR(result.get());
+        for (auto& status: results) {
+            RETURN_IF_ERROR(status);
         }
         results.clear();
         return STATUS_OK;
@@ -235,7 +232,7 @@ private:
     // A counter of how many chunks were written.
     int chunks_written_ = 0;
 
-    std::vector<std::future<AFF4Status>> results;
+    std::vector<AFF4Status> results;
 
     AFF4Status _CompressChunk(int chunk_id, const std::string data) {
         std::string c_data;

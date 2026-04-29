@@ -1,0 +1,2 @@
+/usr/bin/ar qc libblake3.a "CMakeFiles/blake3.dir/_deps/blake3-src/c/blake3.c.o" "CMakeFiles/blake3.dir/_deps/blake3-src/c/blake3_dispatch.c.o" "CMakeFiles/blake3.dir/_deps/blake3-src/c/blake3_portable.c.o"
+/usr/bin/ranlib libblake3.a

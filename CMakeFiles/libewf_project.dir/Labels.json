@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project-complete.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-build.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-configure.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-download.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-install.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-mkdir.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-patch.rule"
+		},
+		{
+			"file" : "/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"libewf_project"
+		],
+		"name" : "libewf_project"
+	}
+}

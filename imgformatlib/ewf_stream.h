@@ -19,7 +19,7 @@ public:
     static std::string FindInfoTxt(const std::string& base_file);
 
     aff4::AFF4Status OpenRead(const std::vector<std::string>& paths);
-    aff4::AFF4Status OpenWrite(const std::string& path, uint64_t logical_size);
+    aff4::AFF4Status OpenWrite(const std::string& path, uint64_t logical_size, uint64_t split_size = 0);
 
     // AFF4Stream overrides
     virtual aff4::AFF4Status ReadBuffer(char* data, size_t* length) override;

@@ -1,0 +1,13 @@
+# Target labels
+ libewf_project
+# Source files and their labels
+/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project
+/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project.rule
+/media/unknown/WDBlue1/FDIA/CMakeFiles/libewf_project-complete.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-build.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-configure.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-download.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-install.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-mkdir.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-patch.rule
+/media/unknown/WDBlue1/FDIA/libewf_ext/src/libewf_project-stamp/libewf_project-update.rule
